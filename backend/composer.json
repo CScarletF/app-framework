@@ -1,0 +1,7 @@
+{
+    "name": "yourorg/logistics-app-framework",
+    "description": "Reusable PHP REST API backend for internal logistics apps",
+    "require": {
+        "bramus/router": "^1.6"
+    }
+}
