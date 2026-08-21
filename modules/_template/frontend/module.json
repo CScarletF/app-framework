@@ -1,0 +1,12 @@
+{
+    "table": "REPLACE_WITH_TABLE_NAME",
+    "label": "REPLACE_WITH_NAV_LABEL",
+    "order": 99,
+    "default": false,
+    "columns": [
+        { "key": "name", "label": "Name" }
+    ],
+    "form": [
+        { "key": "name", "label": "Name", "type": "text", "required": true }
+    ]
+}

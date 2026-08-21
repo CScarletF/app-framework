@@ -1,0 +1,24 @@
+{
+    "table": "equipment",
+    "label": "Equipment",
+    "order": 10,
+    "default": true,
+    "columns": [
+        { "key": "name", "label": "Name" },
+        { "key": "category", "label": "Category" },
+        { "key": "status", "label": "Status" },
+        { "key": "location", "label": "Location" },
+        { "key": "quantity", "label": "Qty" }
+    ],
+    "form": [
+        { "key": "name", "label": "Name", "type": "text", "required": true },
+        { "key": "category", "label": "Category", "type": "select", "required": true,
+          "options": ["server", "network", "storage", "spare_part", "cable", "other"] },
+        { "key": "status", "label": "Status", "type": "select",
+          "options": ["in_use", "spare", "maintenance", "retired"] },
+        { "key": "location", "label": "Location", "type": "text" },
+        { "key": "serial_number", "label": "Serial Number", "type": "text" },
+        { "key": "quantity", "label": "Quantity", "type": "number" },
+        { "key": "notes", "label": "Notes", "type": "textarea" }
+    ]
+}

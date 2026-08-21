@@ -1,0 +1,8 @@
+{
+    "table": "equipment",
+    "required": ["name", "category"],
+    "allowed_values": {
+        "category": ["server", "network", "storage", "spare_part", "cable", "other"],
+        "status": ["in_use", "spare", "maintenance", "retired"]
+    }
+}

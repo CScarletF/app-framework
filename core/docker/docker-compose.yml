@@ -1,0 +1,32 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: core/docker/python/Dockerfile
+    volumes:
+      # Whole project root, not just core/backend -- app.py needs to see
+      # modules/ (sibling to core/) at runtime to discover which modules
+      # are active, so the bind mount has to cover both.
+      - ../..:/app
+    working_dir: /app
+    env_file:
+      - ../../.env
+    command: gunicorn --chdir core/backend -w 2 -b 0.0.0.0:8000 app:app
+    networks:
+      - app_net
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ../../core/frontend:/var/www/frontend:ro
+      - ../../modules:/var/www/frontend/modules:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - app
+    networks:
+      - app_net
+
+networks:
+  app_net:
