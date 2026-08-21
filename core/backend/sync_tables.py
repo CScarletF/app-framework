@@ -80,10 +80,17 @@ def get_engine(db_url: str | None) -> Engine:
 
 # --- segment: schema application (optional) -----------------------------------
 
-def apply_schema_if_needed(engine: Engine, schema_sql: str, apply: bool):
+def apply_schema_if_needed(engine: Engine, schema_sql: str, apply: bool, table_name: str):
     if not apply:
         return
     with engine.begin() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM information_schema.tables WHERE table_name = :t"),
+            {"t": table_name},
+        ).first()
+        if exists:
+            print(f"  '{table_name}' already exists (e.g. provisioned by Ansible) -- skipping schema apply.")
+            return
         conn.execute(text(schema_sql))
 
 
@@ -140,8 +147,9 @@ table = Table(
 
 def sync_one(module_name: str, engine: Engine, apply_schema: bool, dry_run: bool):
     schema_sql = load_module_schema(module_name)
-    apply_schema_if_needed(engine, schema_sql, apply_schema)
-    table = reflect_table(engine, _table_name_from_schema(schema_sql, module_name))
+    table_name = _table_name_from_schema(schema_sql, module_name)
+    apply_schema_if_needed(engine, schema_sql, apply_schema, table_name)
+    table = reflect_table(engine, table_name)
     source = generate_core_file(table, module_name)
 
     out_path = MODULES_DIR / module_name / "table_core.py"

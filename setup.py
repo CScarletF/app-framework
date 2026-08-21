@@ -55,17 +55,22 @@ def build_and_start_containers(conf: dict):
 
 def sync_all_modules(conf: dict, apply_schema: bool):
     modules_dir = PROJECT_ROOT / conf["modules_dir"]
-    sync_script = PROJECT_ROOT / conf["core_dir"] / "backend" / "sync_tables.py"
+    compose_file = PROJECT_ROOT / conf["compose_file"]
 
-    module_names = [p.name for p in modules_dir.iterdir()
-                     if p.is_dir() and (p / "schema.sql").exists()]
+    module_names = [
+        p.name for p in modules_dir.iterdir()
+        if p.is_dir() and not p.name.startswith("_") and (p / "schema.sql").exists()
+    ]
 
     if not module_names:
         print("No modules with schema.sql found, skipping sync.")
         return
 
     for name in module_names:
-        cmd = [sys.executable, str(sync_script), f"--module={name}"]
+        cmd = [
+            "docker", "compose", "-f", str(compose_file), "exec", "-T", "app",
+            "python", "core/backend/sync_tables.py", f"--module={name}",
+        ]
         if apply_schema:
             cmd.append("--apply-schema")
         print(f"Syncing module: {name}")
