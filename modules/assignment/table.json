@@ -1,0 +1,5 @@
+{
+    "table": "assignment",
+    "required": ["equipment_id", "assigned_to"],
+    "allowed_values": {}
+}

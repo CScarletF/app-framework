@@ -1,0 +1,22 @@
+{
+    "table": "assignment",
+    "label": "Assignments",
+    "order": 20,
+    "default": false,
+    "columns": [
+        { "key": "equipment_id", "label": "Item",
+          "relation": { "table": "equipment", "label_field": "name" } },
+        { "key": "assigned_to", "label": "Assigned To" },
+        { "key": "assigned_at", "label": "Assigned At" },
+        { "key": "released_at", "label": "Released At" }
+    ],
+    "form": [
+        { "key": "equipment_id", "label": "Item", "type": "relation", "required": true,
+          "relation": { "table": "equipment", "label_field": "name",
+                        "available_endpoint": "/api/equipment/available" } },
+        { "key": "assigned_to", "label": "Assigned To", "type": "text", "required": true },
+        { "key": "assigned_at", "label": "Assigned At", "type": "datetime-local" },
+        { "key": "released_at", "label": "Released At", "type": "datetime-local" },
+        { "key": "notes", "label": "Notes", "type": "textarea" }
+    ]
+}

@@ -3,6 +3,9 @@
     "label": "Equipment",
     "order": 10,
     "default": true,
+    "actions": [
+        { "label": "Export to Excel", "href": "/api/equipment/export/xlsx" }
+    ],
     "columns": [
         { "key": "name", "label": "Name" },
         { "key": "category", "label": "Category" },

@@ -3,6 +3,20 @@
 // nav entry, a list view, and a form. A module never writes its own
 // render function -- if a module ever needs one, that's a deliberate
 // exception, not the normal path.
+//
+// MODIFIED:
+//   - showModule / _renderList are now async and resolve `relation`
+//     columns (e.g. assignment.equipment_id) to a display label via a
+//     lookup fetched from the related module's table.
+//   - _renderForm renders `type: "relation"` fields as a populated
+//     <select>, optionally scoped to a `relation.available_endpoint`
+//     (e.g. only unassigned equipment) for NEW records. Editing an
+//     existing record always includes its current value even if that
+//     value is no longer "available", so the select never silently
+//     drops the current selection.
+//   - _renderList renders an optional `config.actions` array as plain
+//     link-buttons above the table (e.g. an Export to Excel button) --
+//     generic, config-driven, no module-specific JS needed.
 
 const App = {
     modules: [],   // [{ config, cssLoaded }]
@@ -70,25 +84,50 @@ const App = {
         this._setActiveNav(table);
         const { config } = this.modules.find(m => m.config.table === table);
         const rows = await Api.list(table);
-        this._renderList(config, rows);
+        await this._renderList(config, rows);
     },
 
-    _renderList(config, rows) {
+    async _renderList(config, rows) {
         const content = document.getElementById('content');
         const cols = config.columns;
 
+        // Relation columns (e.g. equipment_id) need a lookup from id -> label
+        // before rendering. Fetched once per render, not per row.
+        const lookups = {};
+        for (const c of cols.filter(c => c.relation)) {
+            const items = await Api.list(c.relation.table);
+            lookups[c.key] = Object.fromEntries(
+                items.map(i => [String(i.id), i[c.relation.label_field]])
+            );
+        }
+
         const header = cols.map(c => `<th>${c.label}</th>`).join('');
         const body = rows.map(row => {
-            const cells = cols.map(c => `<td>${row[c.key] ?? ''}</td>`).join('');
+            const cells = cols.map(c => {
+                const raw = row[c.key];
+                if (c.key === 'status') {
+                    const isActive = raw === 'in_use';
+                    return `<td><span class="status ${isActive ? 'status-active' : ''}">${raw ?? ''}</span></td>`;
+                }
+                const val = c.relation ? (lookups[c.key][String(raw)] ?? raw ?? '') : (raw ?? '');
+                return `<td>${val}</td>`;
+            }).join('');
             return `<tr>${cells}<td>
                 <button data-action="edit" data-id="${row.id}">Edit</button>
                 <button data-action="delete" data-id="${row.id}">Delete</button>
             </td></tr>`;
         }).join('');
 
+        // Generic, config-driven action buttons (e.g. Export to Excel) --
+        // plain links to a backend endpoint, no module-specific JS needed.
+        const actions = (config.actions ?? [])
+            .map(a => `<a class="module-action" href="${a.href}">${a.label}</a>`)
+            .join('');
+
         content.innerHTML = `
             <h2>${config.label}</h2>
             <button id="add-new">+ New</button>
+            ${actions}
             <table><thead><tr>${header}<th></th></tr></thead><tbody>${body}</tbody></table>
         `;
 
@@ -108,10 +147,34 @@ const App = {
         });
     },
 
-    _renderForm(config, existing = null) {
+    async _renderForm(config, existing = null) {
         const content = document.getElementById('content');
-        const fields = config.form.map(f => {
+
+        const fields = await Promise.all(config.form.map(async f => {
             const value = existing?.[f.key] ?? '';
+
+            if (f.type === 'relation') {
+                // New record: use available_endpoint if the module
+                // config declares one (e.g. only unassigned equipment).
+                // Editing an existing record: always use the full table,
+                // then guarantee the current value is present even if it
+                // wouldn't appear in the "available" set -- otherwise the
+                // select silently drops the current selection.
+                const endpoint = (!existing && f.relation.available_endpoint)
+                    ? f.relation.available_endpoint
+                    : `/api/${f.relation.table}`;
+                let items = await fetch(endpoint).then(r => r.json());
+
+                if (existing && value && !items.some(i => String(i.id) === String(value))) {
+                    const current = await Api.get(f.relation.table, value);
+                    items = [current, ...items];
+                }
+
+                const opts = items.map(i =>
+                    `<option value="${i.id}" ${String(i.id) === String(value) ? 'selected' : ''}>${i[f.relation.label_field]}</option>`
+                ).join('');
+                return `<label>${f.label}<select name="${f.key}">${opts}</select></label>`;
+            }
             if (f.type === 'select') {
                 const opts = f.options.map(o =>
                     `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`
@@ -122,12 +185,12 @@ const App = {
                 return `<label>${f.label}<textarea name="${f.key}">${value}</textarea></label>`;
             }
             return `<label>${f.label}<input name="${f.key}" type="${f.type}" value="${value}"></label>`;
-        }).join('');
+        }));
 
         content.innerHTML = `
             <h2>${existing ? 'Edit' : 'New'} ${config.label}</h2>
             <form id="module-form">
-                ${fields}
+                ${fields.join('')}
                 <div class="error" id="form-error"></div>
                 <button type="submit">Save</button>
                 <button type="button" id="cancel">Cancel</button>
