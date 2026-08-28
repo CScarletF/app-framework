@@ -8,6 +8,14 @@ it asked for, so "what's in modules/" and "what's active" are always the
 same thing by construction. This is what replaces the old tables.php
 merge step entirely -- there's nothing to merge, each module is fully
 self-contained in its own folder.
+
+MODIFIED: two-pass loader. First pass builds a `tables` dict across every
+module (unchanged CRUD registration otherwise). Second pass discovers and
+registers each module's optional routes.py, for cross-table logic that
+doesn't fit generic CRUD (e.g. assignment's availability query, which
+needs both its own table and equipment's). Running this as a second pass
+means a module's routes.py can depend on another module's table
+regardless of directory iteration order.
 """
 
 import importlib.util
@@ -50,7 +58,8 @@ def create_app() -> Flask:
     app = Flask(__name__)
     engine = get_engine()
 
-    seen_tables = {}  # table_name -> module_name, to catch duplicate-table collisions loudly
+    seen_tables = {}   # table_name -> module_name, collision check
+    tables = {}        # table_name -> Table object, for cross-module routes.py
 
     for module_dir in sorted(p for p in MODULES_DIR.iterdir() if p.is_dir()):
         if module_dir.name.startswith("_"):
@@ -71,7 +80,22 @@ def create_app() -> Flask:
         seen_tables[table_name] = module_dir.name
 
         table = _load_table_object(module_dir)
+        tables[table_name] = table
         app.register_blueprint(build_module_blueprint(module_dir.name, table, config, engine))
+
+    # Second pass: optional routes.py per module, for cross-table logic
+    # that doesn't fit generic CRUD. Runs after the loop above so every
+    # module's table is already in `tables`, regardless of folder order --
+    # a module needing another module's table (e.g. assignment -> equipment)
+    # shouldn't depend on which one is processed first.
+    for module_dir in sorted(p for p in MODULES_DIR.iterdir() if p.is_dir()):
+        routes_path = module_dir / "routes.py"
+        if not routes_path.exists():
+            continue
+        spec = importlib.util.spec_from_file_location(f"{module_dir.name}_routes", routes_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        app.register_blueprint(mod.build_routes(tables, engine))
 
     @app.get("/api/_health")
     def health():
