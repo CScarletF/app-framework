@@ -16,6 +16,10 @@ doesn't fit generic CRUD (e.g. assignment's availability query, which
 needs both its own table and equipment's). Running this as a second pass
 means a module's routes.py can depend on another module's table
 regardless of directory iteration order.
+
+Also registers export.py's framework-level multi-sheet Excel export,
+which covers every module's table -- not tied to any single module, so
+it's wired directly here rather than via a module's own routes.py.
 """
 
 import importlib.util
@@ -27,6 +31,7 @@ from flask import Flask, jsonify
 
 from db import get_engine
 from crud import build_module_blueprint
+from export import build_export_blueprint
 
 # Two levels up from core/backend/ is the project root, where modules/ lives.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +101,11 @@ def create_app() -> Flask:
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         app.register_blueprint(mod.build_routes(tables, engine))
+
+    # Framework-level export, covers every module's table -- not tied to
+    # any single module, registered directly here rather than via a
+    # module's routes.py.
+    app.register_blueprint(build_export_blueprint(tables, engine))
 
     @app.get("/api/_health")
     def health():

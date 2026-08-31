@@ -213,3 +213,23 @@ form > div.error,
 }
 
 .error:not(:empty) { display: block; }
+
+.module-action {
+    display: inline-block;
+    margin: 0 0 1.25rem 0.5rem;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: 0;
+    font-family: var(--font-body);
+    font-size: 0.85rem;
+    font-weight: 700;
+    transition: border-color 0.12s ease, color 0.12s ease;
+}
+
+.module-action:hover {
+    border-color: var(--blue-gray);
+    color: var(--text-main);
+}
