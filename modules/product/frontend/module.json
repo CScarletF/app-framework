@@ -1,0 +1,21 @@
+{
+    "table": "product",
+    "label": "Products",
+    "order": 5,
+    "default": false,
+    "columns": [
+        { "key": "category", "label": "Category" },
+        { "key": "name", "label": "Name" },
+        { "key": "price", "label": "Price", "format": "number" },
+        { "key": "stock_quantity", "label": "Stock" },
+        { "key": "sku", "label": "SKU" }
+    ],  
+    "form": [
+        { "key": "name", "label": "Name", "type": "text", "required": true },
+        { "key": "category", "label": "Category", "type": "combo", "required": true },
+        { "key": "price", "label": "Price", "type": "number", "required": true },
+        { "key": "stock_quantity", "label": "Stock Quantity", "type": "number" },
+        { "key": "sku", "label": "SKU", "type": "text" },
+        { "key": "notes", "label": "Notes", "type": "textarea" }
+    ]
+}

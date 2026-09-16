@@ -1,0 +1,5 @@
+{
+    "table": "sale",
+    "required": ["total", "payment_method"],
+    "allowed_values": {}
+}

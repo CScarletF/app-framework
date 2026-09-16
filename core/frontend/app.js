@@ -120,11 +120,16 @@ const App = {
                     const isActive = raw === 'in_use';
                     return `<td><span class="status ${isActive ? 'status-active' : ''}">${raw ?? ''}</span></td>`;
                 }
-                const val = c.relation ? (lookups[c.key][String(raw)] ?? raw ?? '') : (raw ?? '');
+                let val = c.relation ? (lookups[c.key][String(raw)] ?? raw ?? '') : (raw ?? '');
+                if (c.format === 'number' && val !== '') {
+                    val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                }
                 return `<td>${val}</td>`;
             }).join('');
-            return `<tr>${cells}<td>
-                <button data-action="edit" data-id="${row.id}">Edit</button>
+            const primaryAction = config.detail_view
+                ? `<button data-action="view" data-id="${row.id}">View</button>`
+                : `<button data-action="edit" data-id="${row.id}">Edit</button>`;
+            return `<tr>${cells}<td>${primaryAction}
                 <button data-action="delete" data-id="${row.id}">Delete</button>
             </td></tr>`;
         }).join('');
@@ -135,14 +140,31 @@ const App = {
             .map(a => `<a class="module-action" href="${a.href}">${a.label}</a>`)
             .join('');
 
+        const addButtonLabel = config.cart_checkout ? '+ New Sale' : '+ New';
+        const showAddButton = config.cart_checkout || !config.hide_add;
+
         content.innerHTML = `
             <h2 class="hero-title">${config.label}</h2>
-            <button id="add-new">+ New</button>
+            ${showAddButton ? `<button id="add-new">${addButtonLabel}</button>` : ''}
             ${actions}
             <table><thead><tr>${header}<th></th></tr></thead><tbody>${body}</tbody></table>
         `;
 
-        content.querySelector('#add-new').addEventListener('click', () => this._renderForm(config));
+        if (showAddButton) {
+            content.querySelector('#add-new').addEventListener('click', () => {
+                if (config.cart_checkout) {
+                    this._renderCart(config);
+                } else {
+                    this._renderForm(config);
+                }
+            });
+        }
+        content.querySelectorAll('[data-action="view"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const row = await Api.get(config.table, btn.dataset.id);
+                this._renderDetail(config, row);
+            });
+        });
         content.querySelectorAll('[data-action="edit"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 const row = await Api.get(config.table, btn.dataset.id);
@@ -152,12 +174,171 @@ const App = {
         content.querySelectorAll('[data-action="delete"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 if (!confirm('Delete this row?')) return;
-                await Api.remove(config.table, btn.dataset.id);
+                if (config.void_endpoint) {
+                    await fetch(config.void_endpoint.replace('{id}', btn.dataset.id), { method: 'DELETE' });
+                } else {
+                    await Api.remove(config.table, btn.dataset.id);
+                }
                 this.showModule(config.table);
             });
         });
     },
 
+    async _renderDetail(config, row) {
+        const content = document.getElementById('content');
+        const endpoint = config.detail_endpoint.replace('{id}', row.id);
+        const items = await fetch(endpoint).then(r => r.json());
+
+        const summaryRows = (config.detail_summary ?? []).map(f => {
+            let val = row[f.key] ?? '';
+            if (f.format === 'number' && val !== '') {
+                val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            }
+            return `<tr><th>${f.label}</th><td>${val}</td></tr>`;
+        }).join('');
+
+        const itemRows = items.map(i => {
+            const subtotal = (i.quantity * i.unit_price_at_sale).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const unitPrice = Number(i.unit_price_at_sale).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            return `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${unitPrice}</td><td>${subtotal}</td></tr>`;
+        }).join('');
+
+        content.innerHTML = `
+            <h2 class="hero-title">${config.label} Detail</h2>
+            <table>${summaryRows}</table>
+            <h2 class="hero-title">Items</h2>
+            <table>
+                <thead><tr><th>Product</th><th>Qty</th><th>Unit Price</th><th>Subtotal</th></tr></thead>
+                <tbody>${itemRows}</tbody>
+            </table>
+            <button id="back">Back</button>
+        `;
+
+        content.querySelector('#back').addEventListener('click', () => this.showModule(config.table));
+    },
+    async _renderCart(config) {
+        const content = document.getElementById('content');
+        const products = await Api.list('product');
+        const cart = {}; // product_id (string) -> { product, quantity }
+        const paymentMethods = config.payment_methods ?? ['cash'];
+        const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        const renderProductList = () => {
+            const rows = products.map(p => `
+                <tr>
+                    <td>${p.category}</td>
+                    <td>${p.name}</td>
+                    <td>${fmt(p.price)}</td>
+                    <td>${p.stock_quantity}</td>
+                    <td><button data-add="${p.id}">Add</button></td>
+                </tr>
+            `).join('');
+            return `<table><thead><tr><th>Category</th><th>Name</th><th>Price</th><th>Stock</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+        };
+
+        const renderCartTable = () => {
+            const entries = Object.values(cart);
+            const rows = entries.map(e => `
+                <tr>
+                    <td>${e.product.name}</td>
+                    <td>
+                        <button data-decrement="${e.product.id}">-</button>
+                        ${e.quantity}
+                        <button data-increment="${e.product.id}">+</button>
+                    </td>
+                    <td>${fmt(e.product.price)}</td>
+                    <td>${fmt(e.product.price * e.quantity)}</td>
+                    <td><button data-remove="${e.product.id}">Remove</button></td>
+                </tr>
+            `).join('');
+            const total = entries.reduce((sum, e) => sum + e.product.price * e.quantity, 0);
+            return `
+                <table><thead><tr><th>Product</th><th>Qty</th><th>Unit Price</th><th>Subtotal</th><th></th></tr></thead>
+                <tbody>${rows}</tbody></table>
+                <p><strong>Total: ${fmt(total)}</strong></p>
+            `;
+        };
+
+        const refreshCart = () => {
+            content.querySelector('#cart-area').innerHTML = renderCartTable();
+            wireCartButtons();
+        };
+
+        const wireCartButtons = () => {
+            content.querySelectorAll('[data-increment]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    cart[btn.dataset.increment].quantity += 1;
+                    refreshCart();
+                });
+            });
+            content.querySelectorAll('[data-decrement]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const id = btn.dataset.decrement;
+                    cart[id].quantity -= 1;
+                    if (cart[id].quantity <= 0) delete cart[id];
+                    refreshCart();
+                });
+            });
+            content.querySelectorAll('[data-remove]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    delete cart[btn.dataset.remove];
+                    refreshCart();
+                });
+            });
+        };
+
+        content.innerHTML = `
+            <h2 class="hero-title">New Sale</h2>
+            <h2 class="hero-title">Products</h2>
+            ${renderProductList()}
+            <h2 class="hero-title">Cart</h2>
+            <div id="cart-area">${renderCartTable()}</div>
+            <label>Payment Method
+                <select id="payment-method">
+                    ${paymentMethods.map(m => `<option value="${m}">${m}</option>`).join('')}
+                </select>
+            </label>
+            <div class="error" id="cart-error"></div>
+            <button id="checkout">Checkout</button>
+            <button type="button" id="cancel">Cancel</button>
+        `;
+
+        content.querySelectorAll('[data-add]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const id = btn.dataset.add;
+                if (cart[id]) {
+                    cart[id].quantity += 1;
+                } else {
+                    cart[id] = { product: products.find(p => String(p.id) === id), quantity: 1 };
+                }
+                refreshCart();
+            });
+        });
+
+        content.querySelector('#cancel').addEventListener('click', () => this.showModule(config.table));
+
+        content.querySelector('#checkout').addEventListener('click', async () => {
+            const items = Object.values(cart).map(e => ({ product_id: e.product.id, quantity: e.quantity }));
+            if (items.length === 0) {
+                content.querySelector('#cart-error').textContent = 'Cart is empty';
+                return;
+            }
+            const payment_method = content.querySelector('#payment-method').value;
+
+            const res = await fetch(config.checkout_endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ payment_method, items }),
+            });
+            const body = await res.json();
+
+            if (!res.ok) {
+                content.querySelector('#cart-error').textContent = body.error ?? 'Checkout failed';
+                return;
+            }
+            this.showModule(config.table);
+        });
+    },
     async _renderForm(config, existing = null) {
         const content = document.getElementById('content');
 
@@ -186,6 +367,15 @@ const App = {
                     `<option value="${i.id}" ${String(i.id) === String(value) ? 'selected' : ''}>${i[f.relation.label_field]}</option>`
                 ).join('');
                 return `<label>${f.label}<select name="${f.key}" ${req}>${opts}</select></label>`;
+            }
+                        if (f.type === 'combo') {
+                const distinctValues = await fetch(`/api/${config.table}/distinct/${f.key}`).then(r => r.json());
+                const datalistId = `datalist-${f.key}`;
+                const opts = distinctValues.map(v => `<option value="${v}"></option>`).join('');
+                return `<label>${f.label}
+                    <input name="${f.key}" type="text" value="${value}" list="${datalistId}" ${req}>
+                    <datalist id="${datalistId}">${opts}</datalist>
+                </label>`;
             }
             if (f.type === 'select') {
                 const opts = f.options.map(o =>

@@ -1,0 +1,6 @@
+{
+    "table": "product",
+    "required": ["name", "category", "price"],
+    "allowed_values": {},
+    "sort": ["category", "name"]
+}

@@ -1,0 +1,5 @@
+{
+    "table": "sale_item",
+    "required": ["sale_id", "product_id", "quantity", "unit_price_at_sale"],
+    "allowed_values": {}
+}

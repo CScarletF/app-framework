@@ -51,11 +51,27 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
     table_name = config["table"]
     bp = Blueprint(f"crud_{module_name}", __name__)
 
+    sort_columns = [c for c in config.get("sort", []) if c in table.c.keys()]
+    order_by_clause = [table.c[c] for c in sort_columns] if sort_columns else [table.c.id.desc()]
+
     @bp.get(f"/api/{table_name}")
     def index():
         with engine.connect() as conn:
-            rows = conn.execute(select(table).order_by(table.c.id.desc())).mappings().all()
+            rows = conn.execute(select(table).order_by(*order_by_clause)).mappings().all()
         return jsonify([dict(r) for r in rows])
+
+    @bp.get(f"/api/{table_name}/distinct/<column>")
+    def distinct_values(column):
+        if column not in table.c.keys():
+            return _json_error(f"Unknown column: {column}", 404)
+        with engine.connect() as conn:
+            values = conn.execute(
+                select(table.c[column])
+                .distinct()
+                .where(table.c[column].isnot(None))
+                .order_by(table.c[column])
+            ).scalars().all()
+        return jsonify(values)
 
     @bp.get(f"/api/{table_name}/<int:row_id>")
     def show(row_id):
@@ -120,3 +136,4 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
         return jsonify({"deleted": True})
 
     return bp
+
