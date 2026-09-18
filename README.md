@@ -152,6 +152,94 @@ Beyond the original `text`/`number`/`textarea`/`select`/`relation`:
   shouldn't be a hardcoded `select` list the way `equipment`'s
   `category` is.
 
+### Optional `table.json` validation key: `distinct_pairs`
+
+```json
+"distinct_pairs": [["menu_item_product_id", "ingredient_product_id"]]
+```
+
+Generic cross-field validation, enforced in `crud.py`'s shared
+`_validate`: rejects a create/update if the two named fields hold the
+same value. Used by `recipe` to stop a product being listed as its own
+ingredient. Backed by a DB-level `CHECK` too (belt and suspenders --
+the app-level check gives a clean `422` with a clear message; the DB
+constraint is the actual guarantee if something ever bypasses the API).
+
+### Generic constraint-violation handling in `crud.py`
+
+`create()` and `update_row()` both wrap their SQL in `try/except
+IntegrityError`, returning a clean `409` with Postgres's own
+`message_primary` text (e.g. `duplicate key value violates unique
+constraint "recipe_unique_pair"`) instead of letting an unhandled
+`IntegrityError` bubble up as a raw `500`. This is framework-level, not
+module-specific -- any module's unique/FK/check constraint violation
+now surfaces cleanly to the frontend's error area rather than crashing
+the request. Added after `recipe`'s `recipe_unique_pair` constraint (see
+below) exposed the gap: the generic multi-row "multi-add" UI submits
+several independent creates in sequence, so a single bad row needs to
+fail cleanly without taking the whole request down.
+
+### Optional `frontend/module.json` keys for multi-row parent+children editing
+
+- `"multi_add"` (bool) -- for a table that's fundamentally "one parent
+  value plus many child rows" (e.g. `recipe`: one menu item, many
+  ingredients). Changes the list view entirely: rows are grouped by the
+  parent field into one displayed row per parent (all children listed
+  inline), "+ New" opens a multi-row add screen (`_renderMultiAdd`)
+  instead of the single-record form, and each group's "Edit" reopens
+  that same screen pre-filled with the whole set -- editing a group
+  always means re-specifying it in full (existing rows are deleted, then
+  the new set is created), never patching one child row in place. Each
+  child row is its own independent `POST` to the generic create
+  endpoint, not one atomic multi-row operation, since the rows have no
+  transactional relationship to each other. Implies `hide_add`'s
+  suppression of the plain single-record form; no need to set both.
+- `"multi_add_parent_field"` -- `{ key, label, relation: { table,
+  label_field } }`, describing the one field shared by the whole group
+  (e.g. `menu_item_product_id` on `recipe`).
+- `"multi_add_child_relation"` -- `{ table, label_field }` for the
+  child rows' relation lookup (e.g. `product` for `recipe`'s
+  ingredients).
+- `"multi_add_child_key"` -- the child rows' own relation field name
+  (e.g. `ingredient_product_id`).
+- `"multi_add_quantity_key"` / `"multi_add_quantity_label"` -- the
+  numeric field each child row carries alongside its relation (e.g.
+  `quantity_required` / "Quantity Required").
+- `"add_button_label"` -- overrides the default "+ New" text on any
+  module's add button (used together with `multi_add` and
+  `cart_checkout`, which already had their own hardcoded labels before
+  this was generalized).
+
+### Cart stock override
+
+`_renderCart`'s cart lines compare the requested quantity against the
+sold product's own `stock_quantity`. When a line exceeds it, an
+"Override" button appears on that line only -- pressing it flags that
+line, changes the warning to a neutral note ("stock will go negative"),
+and allows checkout to proceed for it. Checkout is blocked client-side
+if any overstock line has NOT been overridden, with a clear list of
+which product(s) still need resolving.
+
+The override flag is sent to `/api/sale/checkout` as `items[].override:
+true`. Backend behavior and its one real limitation are documented in
+`sale/routes.py`'s module docstring (see below) -- summarized: override
+is resolved through the same per-underlying-product aggregation the
+normal stock check already uses, so if two cart lines share an
+ingredient and only one is marked override, the whole combined shortfall
+for that ingredient is allowed through, not just the overridden line's
+share.
+
+**This required a real schema change, not just an application-level
+skip**: `product.stock_quantity` originally had `CHECK (stock_quantity
+>= 0)`, which unconditionally rejects any UPDATE that would take it
+negative regardless of what application code decides to allow. The
+constraint was dropped (via a one-off migration, see the companion
+Postgres/Ansible repo's `drop_stock_check.sql`) and removed from
+`modules/product/schema.sql` so fresh installs don't recreate it. A
+product's `stock_quantity` going negative is now a legitimate,
+deliberate state -- it means "the system's count was wrong and a
+manager confirmed physical stock still existed," not a bug.
+
 ## Modules currently in the catalog
 
 - **`equipment`** / **`assignment`** -- the original pair. `equipment`
@@ -173,38 +261,68 @@ Beyond the original `text`/`number`/`textarea`/`select`/`relation`:
   `cart_checkout` (checkout replaces generic create), `detail_view` +
   `detail_endpoint` (View replaces Edit), and `void_endpoint` (Delete
   reverses checkout's stock effects instead of a bare row delete).
+- **`recipe`** -- ties a menu-item `product` to its ingredient
+  `product`(s) with a `quantity_required` per ingredient, enabling cafe
+  support: a sold "menu item" decrements its ingredients' stock instead
+  of its own, resolved at checkout time (see `sale/routes.py` below). A
+  plain grocery item with no `recipe` rows keeps decrementing itself
+  directly -- the same table serves both venue types without a type
+  flag, since checkout simply checks whether `recipe` rows exist for
+  whatever was sold. `menu_item_product_id` and `ingredient_product_id`
+  both point at `product`, guarded against self-reference by a
+  `distinct_pairs` entry in `table.json` plus a DB `CHECK`, and against
+  duplicate ingredient entries per menu item by a DB `UNIQUE` constraint
+  (`recipe_unique_pair`). Uses `multi_add` (see above) for its
+  list/create/edit UI, since one menu item naturally has many
+  ingredients and they're edited as one set, not as independent rows.
 
 ### `sale`'s `routes.py` -- the framework's first multi-table transactional module
 
 Three endpoints beyond generic CRUD, all atomic (single `engine.begin()`
-transaction each):
+transaction each). All three share one helper, `_resolve_stock_impact`,
+which takes `[{product_id, quantity}, ...]` and returns
+`{underlying_product_id: total_qty}` -- resolving each sold item through
+`recipe` (a menu item's requirement cascades onto its ingredients,
+aggregated across every cart line so two items sharing an ingredient
+combine into one combined figure) or, for a plain item with no `recipe`
+rows, onto itself directly.
 
 - **`POST /api/sale/checkout`** -- takes `{ payment_method, items:
-  [{product_id, quantity}, ...] }`. Row-locks (`with_for_update`) every
-  involved `product` row before validating stock, so two concurrent
-  checkouts racing for the last unit can't both pass their own stock
-  check before either commits -- the second waits, re-reads the
-  now-updated stock, and fails cleanly with `409` instead of
-  overselling. On success: inserts the `sale` row, inserts one
+  [{product_id, quantity, override?}, ...] }`. Resolves stock impact via
+  `_resolve_stock_impact`, then row-locks (`with_for_update`) every
+  underlying product involved -- directly-sold items (for pricing) and
+  every ingredient pulled in via `recipe` (for stock) -- in one pass, so
+  two concurrent checkouts racing for the same unit (whether sold
+  directly or as a shared ingredient) can't both pass their own stock
+  check before either commits; the second waits, re-reads the
+  now-updated stock, and fails cleanly with `409`. An item with
+  `"override": true` skips the sufficiency check for whatever it
+  resolves to (see the cart override section above for the limitation
+  this carries). On success: inserts the `sale` row, inserts one
   `sale_item` per line (snapshotting `product.price` into
-  `unit_price_at_sale`), and decrements each product's `stock_quantity`.
-  Any failure partway through (unknown product, insufficient stock)
-  rolls back the whole transaction -- no partial sale is ever left
-  committed.
+  `unit_price_at_sale` -- the price actually sold, not the underlying
+  ingredient's price), and decrements each underlying product's
+  `stock_quantity` (now allowed to go negative when overridden, since
+  the `>= 0` CHECK was dropped). Any failure partway through rolls back
+  the whole transaction.
 - **`GET /api/sale/<id>/items`** -- read-only join of `sale_item` to
   `product` (for the product name), used by the frontend's `detail_view`
   screen. `crud.py`'s generic `show()` only ever returns the `sale` row
   itself, never its line items.
-- **`DELETE /api/sale/<id>/void`** -- the reverse of checkout: restores
-  each line item's quantity back onto its product's `stock_quantity`,
-  then deletes the `sale_item` rows and the `sale` row, all in one
-  transaction. This exists because `sale_item.sale_id` references
-  `sale(id)` with the default `RESTRICT` behavior -- a plain `DELETE
-  FROM sale` fails with a foreign-key violation (by design; it's a
-  safety net against ever deleting a sale while orphaning its line
-  items), and even if it didn't fail, a bare delete would never give
-  back the stock checkout took. `void` is the only correct way to
-  "delete" a sale.
+- **`DELETE /api/sale/<id>/void`** -- the reverse of checkout: re-resolves
+  each sold line through `_resolve_stock_impact` again (against `recipe`
+  as it currently stands -- no snapshot of what a recipe looked like at
+  sale time exists, unlike `unit_price_at_sale`; if a recipe changes
+  between a sale and its void, the restock follows the edited recipe,
+  documented as an accepted limitation in the module's docstring), adds
+  the resolved quantities back onto `stock_quantity`, then deletes the
+  `sale_item` rows and the `sale` row, all in one transaction. This
+  exists because `sale_item.sale_id` references `sale(id)` with the
+  default `RESTRICT` behavior -- a plain `DELETE FROM sale` fails with a
+  foreign-key violation (by design; a safety net against ever deleting a
+  sale while orphaning its line items), and even if it didn't fail, a
+  bare delete would never give back the stock checkout took. `void` is
+  the only correct way to "delete" a sale.
 
 This is the framework's first module where CRUD genuinely isn't enough
 even for creation, not just for one cross-table read (contrast with
@@ -247,4 +365,25 @@ semantics.
   product's currently-known stock; `checkout`'s row-locked validation is
   the actual source of truth and returns `409` if exceeded, surfaced in
   the cart's error area. This avoids a second, potentially stale copy of
-  stock-limit logic living in JS.
+  stock-limit logic living in JS. The one client-side check that does
+  exist -- blocking checkout submission while an unresolved overstock
+  line has no override -- is a UX convenience to avoid a round-trip for
+  an error the user could already see, not a substitute for the
+  server-side check.
+- **A DB-level CHECK constraint is a real design decision, not a
+  default to leave alone.** `product.stock_quantity >= 0` was originally
+  correct (stock should never go negative) and was deliberately dropped
+  once "override" became a real requirement -- a business rule change,
+  not a bug fix. The lesson generalized: a CHECK constraint enforces an
+  invariant the application currently believes is always true, and
+  changing that invariant means an actual migration against the live
+  table (see the companion Postgres/Ansible repo), not just editing
+  `schema.sql` for future installs.
+- **Any module's constraint violation should surface as a clean error,
+  not a stack trace.** `crud.py`'s generic `create()`/`update_row()` now
+  catch `IntegrityError` uniformly, rather than each module needing its
+  own try/except for its own constraints. This matters more once a
+  module (like `recipe`) can be edited through a multi-row UI that fires
+  several independent creates per save -- one bad row needs to fail
+  cleanly without an unhandled exception taking the whole request (and,
+  transitively, the gunicorn worker's response) down.

@@ -19,6 +19,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import select, insert, update, delete
 from sqlalchemy.engine import Engine
 from sqlalchemy import Table
+from sqlalchemy.exc import IntegrityError
 
 
 def _json_error(message: str, code: int):
@@ -39,6 +40,9 @@ def _validate(payload: dict, config: dict, is_update: bool = False):
                 f"Invalid value for {field}: must be one of {', '.join(allowed)}",
                 422,
             )
+    for field_a, field_b in config.get("distinct_pairs", []):
+        if field_a in payload and field_b in payload and payload[field_a] == payload[field_b]:
+            return f"{field_a} and {field_b} must be different", 422
     return None, None
 
 
@@ -93,9 +97,12 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
 
         columns = {k: v for k, v in payload.items() if k in table.c.keys()}
 
-        with engine.begin() as conn:
-            result = conn.execute(insert(table).values(**columns).returning(table))
-            row = result.mappings().first()
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(insert(table).values(**columns).returning(table))
+                row = result.mappings().first()
+        except IntegrityError as e:
+            return _json_error(f"Constraint violation: {e.orig.diag.message_primary}", 409)
 
         return jsonify(dict(row)), 201
 
@@ -113,11 +120,14 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
         if not columns:
             return _json_error("No valid fields to update", 400)
 
-        with engine.begin() as conn:
-            result = conn.execute(
-                update(table).where(table.c.id == row_id).values(**columns).returning(table)
-            )
-            row = result.mappings().first()
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    update(table).where(table.c.id == row_id).values(**columns).returning(table)
+                )
+                row = result.mappings().first()
+        except IntegrityError as e:
+            return _json_error(f"Constraint violation: {e.orig.diag.message_primary}", 409)
 
         if row is None:
             return _json_error("Not found", 404)
@@ -136,4 +146,3 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
         return jsonify({"deleted": True})
 
     return bp
-

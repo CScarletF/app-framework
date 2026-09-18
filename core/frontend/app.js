@@ -3,31 +3,6 @@
 // nav entry, a list view, and a form. A module never writes its own
 // render function -- if a module ever needs one, that's a deliberate
 // exception, not the normal path.
-//
-// MODIFIED:
-//   - showModule / _renderList are now async and resolve `relation`
-//     columns (e.g. assignment.equipment_id) to a display label via a
-//     lookup fetched from the related module's table.
-//   - _renderForm renders `type: "relation"` fields as a populated
-//     <select>, optionally scoped to a `relation.available_endpoint`
-//     (e.g. only unassigned equipment) for NEW records. Editing an
-//     existing record always includes its current value even if that
-//     value is no longer "available", so the select never silently
-//     drops the current selection.
-//   - _renderList renders an optional `config.actions` array as plain
-//     link-buttons above the table (e.g. an Export to Excel button) --
-//     generic, config-driven, no module-specific JS needed.
-//   - _renderList's status column renders as a dot+label badge
-//     (dark-theme design) instead of plain text.
-//   - Both <h2> headings carry the "hero-title" class (dark-theme design).
-//   - _renderForm wires table.json's `required` flag to the native HTML
-//     `required` attribute -- browser shows its own "please fill in this
-//     field" popup, no custom validation JS needed.
-//   - The submit handler strips empty-string fields from the payload
-//     before sending -- an untouched optional <input> always submits ""
-//     via FormData, which most Postgres column types (timestamptz,
-//     integer) reject outright. Omitting the key entirely lets the DB
-//     apply its own default/NULL instead.
 
 const App = {
     modules: [],   // [{ config, cssLoaded }]
@@ -42,9 +17,6 @@ const App = {
             await this._maybeLoadCss(name);
         }
 
-        // Sort by each module's own declared `order` -- nav order is a
-        // property of the module, not of whatever sequence scaffold.py
-        // happened to copy files in.
         this.modules.sort((a, b) => (a.config.order ?? 0) - (b.config.order ?? 0));
 
         this._buildNav();
@@ -55,8 +27,6 @@ const App = {
     },
 
     async _maybeLoadCss(name) {
-        // Not every module has one -- a 404 here is expected and silent
-        // by design (module.css is optional per module).
         try {
             const res = await fetch(`modules/${name}/frontend/module.css`, { method: 'HEAD' });
             if (res.ok) {
@@ -99,11 +69,16 @@ const App = {
     },
 
     async _renderList(config, rows) {
+        // Grouped modules (multiple child rows per one parent, e.g.
+        // recipe's many ingredients per menu item) get an entirely
+        // different list rendering -- see _renderGrouped.
+        if (config.multi_add) {
+            return this._renderGrouped(config, rows);
+        }
+
         const content = document.getElementById('content');
         const cols = config.columns;
 
-        // Relation columns (e.g. equipment_id) need a lookup from id -> label
-        // before rendering. Fetched once per render, not per row.
         const lookups = {};
         for (const c of cols.filter(c => c.relation)) {
             const items = await Api.list(c.relation.table);
@@ -134,14 +109,12 @@ const App = {
             </td></tr>`;
         }).join('');
 
-        // Generic, config-driven action buttons (e.g. Export to Excel) --
-        // plain links to a backend endpoint, no module-specific JS needed.
         const actions = (config.actions ?? [])
             .map(a => `<a class="module-action" href="${a.href}">${a.label}</a>`)
             .join('');
 
-        const addButtonLabel = config.cart_checkout ? '+ New Sale' : '+ New';
-        const showAddButton = config.cart_checkout || !config.hide_add;
+        const addButtonLabel = config.add_button_label ?? (config.cart_checkout ? '+ New Sale' : '+ New');
+        const showAddButton = config.cart_checkout || config.multi_add || !config.hide_add;
 
         content.innerHTML = `
             <h2 class="hero-title">${config.label}</h2>
@@ -154,6 +127,8 @@ const App = {
             content.querySelector('#add-new').addEventListener('click', () => {
                 if (config.cart_checkout) {
                     this._renderCart(config);
+                } else if (config.multi_add) {
+                    this._renderMultiAdd(config);
                 } else {
                     this._renderForm(config);
                 }
@@ -181,6 +156,188 @@ const App = {
                 }
                 this.showModule(config.table);
             });
+        });
+    },
+
+    // Groups rows by config.multi_add_parent_field.key (e.g. recipe rows
+    // by menu_item_product_id) into one displayed row per parent, listing
+    // every child (ingredient) inline. Edit reopens _renderMultiAdd
+    // pre-filled with the whole group; Delete removes every row in the
+    // group. There is no per-child-row edit/delete in this view --
+    // editing a group always means re-specifying the whole set, per the
+    // module's own semantics (a recipe's ingredient list isn't a
+    // collection of independent facts, it's one definition).
+    async _renderGrouped(config, rows) {
+        const content = document.getElementById('content');
+        const parentField = config.multi_add_parent_field;
+        const childRelation = config.multi_add_child_relation;
+        const childKey = config.multi_add_child_key;
+        const qtyKey = config.multi_add_quantity_key;
+
+        const parentItems = await Api.list(parentField.relation.table);
+        const parentLookup = Object.fromEntries(
+            parentItems.map(i => [String(i.id), i[parentField.relation.label_field]])
+        );
+        const childItems = await Api.list(childRelation.table);
+        const childLookup = Object.fromEntries(
+            childItems.map(i => [String(i.id), i[childRelation.label_field]])
+        );
+
+        const groups = {};
+        for (const row of rows) {
+            const key = String(row[parentField.key]);
+            (groups[key] ??= []).push(row);
+        }
+
+        const bodyRows = Object.entries(groups).map(([parentId, groupRows]) => {
+            const parentLabel = parentLookup[parentId] ?? parentId;
+            const ingredientsText = groupRows.map(r => {
+                const childLabel = childLookup[String(r[childKey])] ?? r[childKey];
+                return `${childLabel} (${r[qtyKey]})`;
+            }).join(', ');
+            const ids = groupRows.map(r => r.id).join(',');
+            return `<tr>
+                <td>${parentLabel}</td>
+                <td>${ingredientsText}</td>
+                <td>
+                    <button data-action="edit-group" data-parent="${parentId}" data-ids="${ids}">Edit</button>
+                    <button data-action="delete-group" data-ids="${ids}">Delete</button>
+                </td>
+            </tr>`;
+        }).join('');
+
+        content.innerHTML = `
+            <h2 class="hero-title">${config.label}</h2>
+            <button id="add-new">${config.add_button_label ?? '+ New'}</button>
+            <table>
+                <thead><tr><th>${parentField.label}</th><th>Ingredients</th><th></th></tr></thead>
+                <tbody>${bodyRows}</tbody>
+            </table>
+        `;
+
+        content.querySelector('#add-new').addEventListener('click', () => this._renderMultiAdd(config));
+
+        content.querySelectorAll('[data-action="edit-group"]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const parentId = btn.dataset.parent;
+                const ids = btn.dataset.ids.split(',').map(s => Number(s));
+                const groupRows = rows.filter(r => ids.includes(r.id));
+                this._renderMultiAdd(config, { parentValue: parentId, rows: groupRows });
+            });
+        });
+
+        content.querySelectorAll('[data-action="delete-group"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!confirm('Delete this recipe?')) return;
+                const ids = btn.dataset.ids.split(',');
+                await Promise.all(ids.map(id => Api.remove(config.table, id)));
+                this.showModule(config.table);
+            });
+        });
+    },
+
+    // Add or replace a whole parent+children set in one screen (e.g. a
+    // menu item and all of its ingredients). Each child row becomes one
+    // POST to the generic create endpoint on submit -- these are
+    // independent CRUD creates, not one atomic operation, since the
+    // rows themselves have no transactional relationship to each other.
+    // When editingGroup is passed, all of its existing rows are deleted
+    // first, then the freshly-specified set is created -- editing always
+    // means re-specifying the whole set, never patching one child row.
+    async _renderMultiAdd(config, editingGroup = null) {
+        const content = document.getElementById('content');
+        const parentField = config.multi_add_parent_field;
+        const childRelation = config.multi_add_child_relation;
+        const childKey = config.multi_add_child_key;
+        const qtyKey = config.multi_add_quantity_key;
+        const qtyLabel = config.multi_add_quantity_label ?? 'Quantity';
+
+        const parentOptions = await fetch(`/api/${parentField.relation.table}`).then(r => r.json());
+        const childOptions = await fetch(`/api/${childRelation.table}`).then(r => r.json());
+
+        const parentOpts = parentOptions.map(p => {
+            const selected = editingGroup && String(p.id) === String(editingGroup.parentValue) ? 'selected' : '';
+            return `<option value="${p.id}" ${selected}>${p[parentField.relation.label_field]}</option>`;
+        }).join('');
+
+        const childOptsHtml = (selectedValue) => childOptions.map(p =>
+            `<option value="${p.id}" ${String(p.id) === String(selectedValue) ? 'selected' : ''}>${p[childRelation.label_field]}</option>`
+        ).join('');
+
+        let rowCount = 0;
+
+        const addRow = (prefill = null) => {
+            rowCount += 1;
+            const childValue = prefill ? prefill[childKey] : null;
+            const qtyValue = prefill ? prefill[qtyKey] : '';
+            const rowHtml = `
+                <div class="multi-add-row" data-row="${rowCount}">
+                    <select data-child>${childOptsHtml(childValue)}</select>
+                    <input type="number" data-qty placeholder="${qtyLabel}" min="1" value="${qtyValue}" required>
+                    <button type="button" data-remove-row>Remove</button>
+                </div>`;
+            content.querySelector('#multi-add-rows').insertAdjacentHTML('beforeend', rowHtml);
+            content.querySelector(`[data-row="${rowCount}"] [data-remove-row]`)
+                .addEventListener('click', (e) => e.target.closest('.multi-add-row').remove());
+        };
+
+        content.innerHTML = `
+            <h2 class="hero-title">${editingGroup ? 'Edit' : 'New'} ${config.label.replace(/s$/, '')}</h2>
+            <label>${parentField.label}
+                <select id="multi-add-parent" required>${parentOpts}</select>
+            </label>
+            <h2 class="hero-title">Ingredients</h2>
+            <div id="multi-add-rows"></div>
+            <button type="button" id="add-row">+ Add Ingredient</button>
+            <div class="error" id="multi-add-error"></div>
+            <button id="multi-add-submit">Save</button>
+            <button type="button" id="cancel">Cancel</button>
+        `;
+
+        if (editingGroup && editingGroup.rows.length > 0) {
+            editingGroup.rows.forEach(r => addRow(r));
+        } else {
+            addRow();
+        }
+
+        content.querySelector('#add-row').addEventListener('click', () => addRow());
+        content.querySelector('#cancel').addEventListener('click', () => this.showModule(config.table));
+
+        content.querySelector('#multi-add-submit').addEventListener('click', async () => {
+            const parentValue = content.querySelector('#multi-add-parent').value;
+            const rowEls = Array.from(content.querySelectorAll('.multi-add-row'));
+
+            if (rowEls.length === 0) {
+                content.querySelector('#multi-add-error').textContent = 'Add at least one ingredient';
+                return;
+            }
+
+            if (editingGroup) {
+                await Promise.all(editingGroup.rows.map(r => Api.remove(config.table, r.id)));
+            }
+
+            const errors = [];
+            for (const rowEl of rowEls) {
+                const childValue = rowEl.querySelector('[data-child]').value;
+                const qtyValue = rowEl.querySelector('[data-qty]').value;
+                if (!qtyValue) continue;
+
+                const payload = {
+                    [parentField.key]: parentValue,
+                    [childKey]: childValue,
+                    [qtyKey]: qtyValue,
+                };
+                const result = await Api.create(config.table, payload);
+                if (!result.ok) {
+                    errors.push(result.body.error ?? 'Save failed');
+                }
+            }
+
+            if (errors.length > 0) {
+                content.querySelector('#multi-add-error').textContent = errors.join('; ');
+                return;
+            }
+            this.showModule(config.table);
         });
     },
 
@@ -216,10 +373,11 @@ const App = {
 
         content.querySelector('#back').addEventListener('click', () => this.showModule(config.table));
     },
+
     async _renderCart(config) {
         const content = document.getElementById('content');
         const products = await Api.list('product');
-        const cart = {}; // product_id (string) -> { product, quantity }
+        const cart = {}; // product_id (string) -> { product, quantity, override }
         const paymentMethods = config.payment_methods ?? ['cash'];
         const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -238,19 +396,29 @@ const App = {
 
         const renderCartTable = () => {
             const entries = Object.values(cart);
-            const rows = entries.map(e => `
-                <tr>
-                    <td>${e.product.name}</td>
-                    <td>
-                        <button data-decrement="${e.product.id}">-</button>
-                        ${e.quantity}
-                        <button data-increment="${e.product.id}">+</button>
-                    </td>
-                    <td>${fmt(e.product.price)}</td>
-                    <td>${fmt(e.product.price * e.quantity)}</td>
-                    <td><button data-remove="${e.product.id}">Remove</button></td>
-                </tr>
-            `).join('');
+            const rows = entries.map(e => {
+                const overStock = e.quantity > e.product.stock_quantity;
+                const needsOverride = overStock && !e.override;
+                let stockNote = '';
+                if (needsOverride) {
+                    stockNote = `<br><span class="error" style="display:block;">Only ${e.product.stock_quantity} in stock. <button data-override="${e.product.id}">Override</button></span>`;
+                } else if (overStock && e.override) {
+                    stockNote = `<br><span style="color:var(--accent);">Override applied -- stock will go negative</span>`;
+                }
+                return `
+                    <tr>
+                        <td>${e.product.name}${stockNote}</td>
+                        <td>
+                            <button data-decrement="${e.product.id}">-</button>
+                            ${e.quantity}
+                            <button data-increment="${e.product.id}">+</button>
+                        </td>
+                        <td>${fmt(e.product.price)}</td>
+                        <td>${fmt(e.product.price * e.quantity)}</td>
+                        <td><button data-remove="${e.product.id}">Remove</button></td>
+                    </tr>
+                `;
+            }).join('');
             const total = entries.reduce((sum, e) => sum + e.product.price * e.quantity, 0);
             return `
                 <table><thead><tr><th>Product</th><th>Qty</th><th>Unit Price</th><th>Subtotal</th><th></th></tr></thead>
@@ -285,6 +453,12 @@ const App = {
                     refreshCart();
                 });
             });
+            content.querySelectorAll('[data-override]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    cart[btn.dataset.override].override = true;
+                    refreshCart();
+                });
+            });
         };
 
         content.innerHTML = `
@@ -309,7 +483,7 @@ const App = {
                 if (cart[id]) {
                     cart[id].quantity += 1;
                 } else {
-                    cart[id] = { product: products.find(p => String(p.id) === id), quantity: 1 };
+                    cart[id] = { product: products.find(p => String(p.id) === id), quantity: 1, override: false };
                 }
                 refreshCart();
             });
@@ -318,11 +492,24 @@ const App = {
         content.querySelector('#cancel').addEventListener('click', () => this.showModule(config.table));
 
         content.querySelector('#checkout').addEventListener('click', async () => {
-            const items = Object.values(cart).map(e => ({ product_id: e.product.id, quantity: e.quantity }));
-            if (items.length === 0) {
+            const entries = Object.values(cart);
+            if (entries.length === 0) {
                 content.querySelector('#cart-error').textContent = 'Cart is empty';
                 return;
             }
+
+            const unresolved = entries.filter(e => e.quantity > e.product.stock_quantity && !e.override);
+            if (unresolved.length > 0) {
+                content.querySelector('#cart-error').textContent =
+                    `Resolve stock warnings before checkout: ${unresolved.map(e => e.product.name).join(', ')}`;
+                return;
+            }
+
+            const items = entries.map(e => ({
+                product_id: e.product.id,
+                quantity: e.quantity,
+                override: !!e.override,
+            }));
             const payment_method = content.querySelector('#payment-method').value;
 
             const res = await fetch(config.checkout_endpoint, {
@@ -339,6 +526,7 @@ const App = {
             this.showModule(config.table);
         });
     },
+
     async _renderForm(config, existing = null) {
         const content = document.getElementById('content');
 
@@ -347,12 +535,6 @@ const App = {
             const req = f.required ? 'required' : '';
 
             if (f.type === 'relation') {
-                // New record: use available_endpoint if the module config
-                // declares one (e.g. only unassigned equipment). Editing an
-                // existing record: always use the full table, then guarantee
-                // the current value is present even if it wouldn't appear in
-                // the "available" set -- otherwise the select silently drops
-                // the current selection.
                 const endpoint = (!existing && f.relation.available_endpoint)
                     ? f.relation.available_endpoint
                     : `/api/${f.relation.table}`;
@@ -368,7 +550,7 @@ const App = {
                 ).join('');
                 return `<label>${f.label}<select name="${f.key}" ${req}>${opts}</select></label>`;
             }
-                        if (f.type === 'combo') {
+            if (f.type === 'combo') {
                 const distinctValues = await fetch(`/api/${config.table}/distinct/${f.key}`).then(r => r.json());
                 const datalistId = `datalist-${f.key}`;
                 const opts = distinctValues.map(v => `<option value="${v}"></option>`).join('');
@@ -404,10 +586,6 @@ const App = {
         content.querySelector('#module-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const raw = Object.fromEntries(new FormData(e.target).entries());
-            // Empty strings from untouched optional inputs aren't valid values
-            // for most Postgres column types (timestamptz, integer, etc.) --
-            // omit them entirely rather than sending "" and letting the DB
-            // reject the insert.
             const data = Object.fromEntries(
                 Object.entries(raw).filter(([, v]) => v !== '')
             );

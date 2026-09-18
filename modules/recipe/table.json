@@ -1,0 +1,6 @@
+{
+    "table": "recipe",
+    "required": ["menu_item_product_id", "ingredient_product_id", "quantity_required"],
+    "allowed_values": {},
+    "distinct_pairs": [["menu_item_product_id", "ingredient_product_id"]]
+}

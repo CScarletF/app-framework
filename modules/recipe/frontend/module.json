@@ -1,0 +1,32 @@
+{
+    "table": "recipe",
+    "label": "Recipes",
+    "order": 12,
+    "default": false,
+    "hide_add": true,
+    "multi_add": true,
+    "add_button_label": "+ New Recipe",
+    "multi_add_parent_field": {
+        "key": "menu_item_product_id",
+        "label": "Menu Item",
+        "relation": { "table": "product", "label_field": "name" }
+    },
+    "multi_add_child_relation": { "table": "product", "label_field": "name" },
+    "multi_add_child_key": "ingredient_product_id",
+    "multi_add_quantity_key": "quantity_required",
+    "multi_add_quantity_label": "Quantity Required",
+    "columns": [
+        { "key": "menu_item_product_id", "label": "Menu Item",
+          "relation": { "table": "product", "label_field": "name" } },
+        { "key": "ingredient_product_id", "label": "Ingredient",
+          "relation": { "table": "product", "label_field": "name" } },
+        { "key": "quantity_required", "label": "Qty Required" }
+    ],
+    "form": [
+        { "key": "menu_item_product_id", "label": "Menu Item", "type": "relation", "required": true,
+          "relation": { "table": "product", "label_field": "name" } },
+        { "key": "ingredient_product_id", "label": "Ingredient", "type": "relation", "required": true,
+          "relation": { "table": "product", "label_field": "name" } },
+        { "key": "quantity_required", "label": "Quantity Required", "type": "number", "required": true }
+    ]
+}

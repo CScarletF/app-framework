@@ -3,7 +3,10 @@ CREATE TABLE product (
     name text NOT NULL,
     category text NOT NULL,
     price numeric(10,2) NOT NULL CHECK (price >= 0),
-    stock_quantity integer NOT NULL DEFAULT 0 CHECK (stock_quantity >= 0),
+    -- No lower-bound CHECK: checkout's "override" path deliberately
+    -- allows negative stock when a manager confirms the system's count
+    -- is wrong but physical stock still exists.
+    stock_quantity integer NOT NULL DEFAULT 0,
     sku text,
     notes text,
     created_at timestamptz NOT NULL DEFAULT now(),
