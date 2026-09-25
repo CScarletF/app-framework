@@ -1,3 +1,3 @@
 {
-    "modules": ["equipment", "assignment", "product","sale","recipe"]
+    "modules": ["equipment", "assignment", "product","sale","recipe","reporting"]
 }

@@ -210,6 +210,23 @@ fail cleanly without taking the whole request down.
   `cart_checkout`, which already had their own hardcoded labels before
   this was generalized).
 
+### Optional `frontend/module.json` keys: read-only report views
+
+- `"report_view"` (bool) -- for a module with no backing table of its
+  own, existing purely to aggregate other tables' data (e.g.
+  `reporting`). Renders no add/edit/delete affordances at all. Fetches
+  from `"report_endpoint"` instead of `/api/<table>`, since a report-view
+  module has no generic CRUD blueprint to fetch from.
+- `"report_endpoint"` -- the URL the report view fetches from.
+- `"report_filters"` (array, e.g. `["start_date", "end_date"]`) --
+  renders one date `<input>` per named filter plus an "Apply" button;
+  the filters are sent as query-string parameters and the view re-fetches
+  on Apply rather than filtering client-side, since the aggregation
+  itself happens in SQL.
+- `"report_summary_key"` / `"report_summary_label"` -- if set, sums that
+  numeric column across every returned row into a footer total (e.g.
+  total revenue across all rows currently shown).
+
 ### Cart stock override
 
 `_renderCart`'s cart lines compare the requested quantity against the
@@ -275,6 +292,17 @@ manager confirmed physical stock still existed," not a bug.
   (`recipe_unique_pair`). Uses `multi_add` (see above) for its
   list/create/edit UI, since one menu item naturally has many
   ingredients and they're edited as one set, not as independent rows.
+- **`reporting`** -- read-only, no backing table of its own; the
+  framework's first module to rely entirely on `app.py`'s existing
+  two-pass loader registering a bare `routes.py` with no accompanying
+  `table.json`. `GET /api/reporting/sales-summary[?start_date=&end_date=]`
+  groups `sale_item` by `(product_id, unit_price_at_sale)`, joined to
+  `sale` (for date filtering against `sold_at`) and `product` (for the
+  display name). Grouping on the *snapshotted* price rather than the
+  product's current price means a price change mid-period surfaces as
+  two separate summary rows, not a blended average -- the same reasoning
+  `sale_item` itself is snapshotted for. Uses `report_view` (see above)
+  on the frontend.
 
 ### `sale`'s `routes.py` -- the framework's first multi-table transactional module
 

@@ -64,6 +64,9 @@ const App = {
         this.activeTable = table;
         this._setActiveNav(table);
         const { config } = this.modules.find(m => m.config.table === table);
+        if (config.report_view) {
+            return this._renderReport(config);
+        }
         const rows = await Api.list(table);
         await this._renderList(config, rows);
     },
@@ -341,6 +344,73 @@ const App = {
         });
     },
 
+    // Read-only cross-sale aggregation view (e.g. the reporting module).
+    // Fetches from config.report_endpoint rather than /api/<table> -- a
+    // report module owns no table of its own. Optional date-range
+    // filters (config.report_filters) re-fetch on "Apply" rather than
+    // client-side filtering, since the aggregation itself happens in
+    // SQL. config.report_summary_key, if set, sums that column across
+    // all returned rows into a footer total.
+    async _renderReport(config) {
+        const content = document.getElementById('content');
+        const filters = config.report_filters ?? [];
+        const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        const filterLabels = { start_date: 'From', end_date: 'To' };
+        const filterInputsHtml = filters.map(f =>
+            `<label>${filterLabels[f] ?? f} <input type="date" data-filter="${f}"></label>`
+        ).join('');
+
+        const fetchAndRender = async () => {
+            const params = new URLSearchParams();
+            filters.forEach(f => {
+                const el = content.querySelector(`[data-filter="${f}"]`);
+                if (el && el.value) params.set(f, el.value);
+            });
+            const url = params.toString() ? `${config.report_endpoint}?${params}` : config.report_endpoint;
+            const rows = await fetch(url).then(r => r.json());
+
+            const cols = config.columns;
+            const header = cols.map(c => `<th>${c.label}</th>`).join('');
+            const body = rows.map(row => {
+                const cells = cols.map(c => {
+                    let val = row[c.key] ?? '';
+                    if (c.format === 'number' && val !== '') {
+                        val = fmt(val);
+                    }
+                    return `<td>${val}</td>`;
+                }).join('');
+                return `<tr>${cells}</tr>`;
+            }).join('');
+
+            let summaryHtml = '';
+            if (config.report_summary_key) {
+                const total = rows.reduce((sum, r) => sum + Number(r[config.report_summary_key] ?? 0), 0);
+                summaryHtml = `<p><strong>${config.report_summary_label ?? 'Total'}: ${fmt(total)}</strong></p>`;
+            }
+
+            content.querySelector('#report-table-area').innerHTML = `
+                <table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>
+                ${summaryHtml}
+            `;
+        };
+
+        content.innerHTML = `
+            <h2 class="hero-title">${config.label}</h2>
+            <div id="report-filters">
+                ${filterInputsHtml}
+                ${filters.length > 0 ? '<button id="report-apply">Apply</button>' : ''}
+            </div>
+            <div id="report-table-area"></div>
+        `;
+
+        if (filters.length > 0) {
+            content.querySelector('#report-apply').addEventListener('click', fetchAndRender);
+        }
+
+        await fetchAndRender();
+    },
+
     async _renderDetail(config, row) {
         const content = document.getElementById('content');
         const endpoint = config.detail_endpoint.replace('{id}', row.id);
@@ -377,9 +447,47 @@ const App = {
     async _renderCart(config) {
         const content = document.getElementById('content');
         const products = await Api.list('product');
+        const recipes = await Api.list('recipe');
         const cart = {}; // product_id (string) -> { product, quantity, override }
         const paymentMethods = config.payment_methods ?? ['cash'];
         const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+        // productId -> [{ ingredient_product_id, quantity_required }, ...]
+        const recipesByMenuItem = {};
+        recipes.forEach(r => {
+            const key = String(r.menu_item_product_id);
+            (recipesByMenuItem[key] ??= []).push(r);
+        });
+        const productById = Object.fromEntries(products.map(p => [String(p.id), p]));
+
+        // What a given quantity of productId ACTUALLY decrements --
+        // its ingredients if it has recipe rows (a menu item), itself
+        // otherwise. Mirrors sale/routes.py's _resolve_stock_impact,
+        // but per cart LINE only (not aggregated across lines sharing
+        // an ingredient) -- same simplification the backend's own
+        // override handling already accepts, kept consistent here.
+        const resolveLineImpact = (productId, quantity) => {
+            const ingredients = recipesByMenuItem[String(productId)];
+            if (ingredients && ingredients.length > 0) {
+                return ingredients.map(r => ({
+                    productId: r.ingredient_product_id,
+                    needed: r.quantity_required * quantity,
+                }));
+            }
+            return [{ productId, needed: quantity }];
+        };
+
+        // Returns the impact entries that exceed currently-known stock
+        // for a cart line -- empty array means the line is fully
+        // coverable as-is, whether it's a plain item or a recipe-based
+        // one.
+        const shortagesForLine = (e) => resolveLineImpact(e.product.id, e.quantity)
+            .map(imp => {
+                const p = productById[String(imp.productId)];
+                const available = p ? p.stock_quantity : 0;
+                return { name: p ? p.name : `#${imp.productId}`, needed: imp.needed, available };
+            })
+            .filter(s => s.needed > s.available);
 
         const renderProductList = () => {
             const rows = products.map(p => `
@@ -397,12 +505,13 @@ const App = {
         const renderCartTable = () => {
             const entries = Object.values(cart);
             const rows = entries.map(e => {
-                const overStock = e.quantity > e.product.stock_quantity;
-                const needsOverride = overStock && !e.override;
+                const shortages = shortagesForLine(e);
+                const needsOverride = shortages.length > 0 && !e.override;
                 let stockNote = '';
                 if (needsOverride) {
-                    stockNote = `<br><span class="error" style="display:block;">Only ${e.product.stock_quantity} in stock. <button data-override="${e.product.id}">Override</button></span>`;
-                } else if (overStock && e.override) {
+                    const detail = shortages.map(s => `${s.name}: need ${s.needed}, have ${s.available}`).join('; ');
+                    stockNote = `<br><span class="error" style="display:block;">Insufficient stock -- ${detail}. <button data-override="${e.product.id}">Override</button></span>`;
+                } else if (shortages.length > 0 && e.override) {
                     stockNote = `<br><span style="color:var(--accent);">Override applied -- stock will go negative</span>`;
                 }
                 return `
@@ -498,7 +607,7 @@ const App = {
                 return;
             }
 
-            const unresolved = entries.filter(e => e.quantity > e.product.stock_quantity && !e.override);
+            const unresolved = entries.filter(e => shortagesForLine(e).length > 0 && !e.override);
             if (unresolved.length > 0) {
                 content.querySelector('#cart-error').textContent =
                     `Resolve stock warnings before checkout: ${unresolved.map(e => e.product.name).join(', ')}`;

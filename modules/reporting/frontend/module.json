@@ -1,0 +1,18 @@
+{
+    "table": "reporting",
+    "label": "Sales Report",
+    "order": 25,
+    "default": false,
+    "report_view": true,
+    "report_endpoint": "/api/reporting/sales-summary",
+    "report_filters": ["start_date", "end_date"],
+    "report_summary_key": "total_revenue",
+    "report_summary_label": "Total Revenue",
+    "columns": [
+        { "key": "product_name", "label": "Product" },
+        { "key": "unit_price_at_sale", "label": "Unit Price", "format": "number" },
+        { "key": "total_quantity", "label": "Qty Sold" },
+        { "key": "total_revenue", "label": "Revenue", "format": "number" },
+        { "key": "sale_count", "label": "# Sales" }
+    ]
+}
