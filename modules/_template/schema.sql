@@ -1,14 +1,16 @@
--- Copy this folder to modules/<your_module_name>/, then:
--- 1. Rename this table and add your real columns below.
--- 2. Update table.json to match (table name, required fields, allowed_values).
--- 3. Update frontend/module.json to match (columns, form fields).
--- 4. Run: python core/backend/sync_tables.py --module=<your_module_name> --apply-schema
---    This applies this file to the DB and generates table_core.py for you --
---    you never hand-write table_core.py.
-
-CREATE TABLE REPLACE_WITH_TABLE_NAME (
+CREATE TABLE equipment (
     id serial PRIMARY KEY,
     name text NOT NULL,
+    category text NOT NULL CHECK (category IN ('server', 'network', 'storage', 'spare_part', 'cable', 'other')),
+    status text NOT NULL DEFAULT 'in_use' CHECK (status IN ('in_use', 'spare', 'maintenance', 'retired')),
+    location text,
+    serial_number text,
+    quantity integer NOT NULL DEFAULT 1 CHECK (quantity >= 0),
+    notes text,
+    -- Audit attribution. Nullable: rows created before authentication
+    -- existed (or with it disabled) have no author.
+    created_by integer REFERENCES app_user(id),
+    updated_by integer REFERENCES app_user(id),
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
@@ -21,7 +23,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER REPLACE_WITH_TABLE_NAME_updated_at
-    BEFORE UPDATE ON REPLACE_WITH_TABLE_NAME
+CREATE TRIGGER equipment_updated_at
+    BEFORE UPDATE ON equipment
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();

@@ -1,0 +1,15 @@
+{
+    "table": "app_user",
+    "required": ["username", "password_hash", "role"],
+    "allowed_values": {
+        "role": ["admin", "staff"]
+    },
+    "hashed_fields": ["password_hash"],
+    "readonly_fields": ["failed_login_count", "locked_until"],
+    "disable_delete": true,
+    "sort": ["username"],
+    "permissions": {
+        "admin": ["create", "update"],
+        "staff": []
+    }
+}

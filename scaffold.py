@@ -8,11 +8,15 @@ app.py discovers whatever's physically present under modules/ at
 runtime. Table-name collisions are still caught, but at app startup
 (app.py), not here -- scaffold.py's only job is copying files.
 
+AUTH: authentication is active only if the app_user module is among the
+selected modules. Leaving it out is allowed (the app then runs with NO
+login at all), so scaffold.py prints a warning instead of refusing.
+
 USAGE:
     python scaffold.py --out=../equipment-tracker
         (no --modules given -> reads default.conf)
 
-    python scaffold.py --modules=equipment,inventory --out=../logistics-b
+    python scaffold.py --modules=app_user,equipment,inventory --out=../logistics-b
         (explicit list REPLACES default.conf entirely, no merging)
 """
 
@@ -26,7 +30,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 MODULES_DIR = PROJECT_ROOT / "modules"
 CORE_DIR = PROJECT_ROOT / "core"
 
-ROOT_FILES_TO_COPY = ["requirements.txt", ".env.example", ".gitignore", "setup.conf", "setup.py"]
+AUTH_MODULE = "app_user"
+
+ROOT_FILES_TO_COPY = [
+    "requirements.txt", ".env.example", ".gitignore",
+    "setup.conf", "setup.py", "permissions.conf",
+]
 
 
 def resolve_module_list(explicit: str | None) -> list[str]:
@@ -108,10 +117,16 @@ def main():
     copy_root_files(out_dir)
 
     print(f"Scaffolded app at {out_dir} with modules: {', '.join(module_names)}")
+    if AUTH_MODULE not in module_names:
+        print(f"\nWARNING: '{AUTH_MODULE}' was not selected. This app will run WITHOUT "
+              f"authentication: every request, including writes and deletes, will be open. "
+              f"Re-scaffold with '{AUTH_MODULE}' in --modules to enable login.", file=sys.stderr)
     print("\nNext steps:")
     print(f"  cd {out_dir}")
     print("  cp .env.example .env   # then fill in real DB credentials")
-    print("  python setup.py         # brings up containers, syncs schema, verifies")
+    if AUTH_MODULE in module_names:
+        print("  # create the app_user table first (infrastructure repo: sudo scripts/setup.sh)")
+    print("  python setup.py         # auth env, containers, schema sync, admin seed, verify")
 
 
 if __name__ == "__main__":

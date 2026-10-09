@@ -32,12 +32,24 @@ body {
     font-size: 15px;
 }
 
-#nav {
+/* Sidebar = nav (scrolls, takes the free space) + user area pinned to the
+   bottom, same placement convention as chat apps. */
+#sidebar {
     width: 220px;
     background: var(--surface-raised);
     border-right: 1px solid var(--border);
-    padding: 1.5rem 0;
+    display: flex;
+    flex-direction: column;
     flex-shrink: 0;
+    height: 100vh;
+    position: sticky;
+    top: 0;
+}
+
+#nav {
+    flex: 1;
+    padding: 1.5rem 0;
+    overflow-y: auto;
 }
 
 #nav a {
@@ -62,6 +74,101 @@ body {
     border-left-color: var(--accent);
 }
 
+#user-area {
+    position: relative;
+    border-top: 1px solid var(--border);
+    padding: 0.5rem;
+}
+
+#user-area:empty {
+    display: none;
+}
+
+.user-button {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid transparent;
+    background: transparent;
+    text-align: left;
+}
+
+.user-button:hover {
+    background: var(--surface-hover);
+    border-color: var(--border);
+}
+
+.user-avatar {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--accent);
+    color: var(--surface);
+    font-family: var(--font-heading);
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+
+.user-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.user-name {
+    color: var(--text-main);
+    font-size: 0.85rem;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.user-role {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 400;
+    text-transform: capitalize;
+}
+
+.user-menu {
+    position: absolute;
+    left: 0.5rem;
+    right: 0.5rem;
+    bottom: 100%;
+    margin-bottom: 0.25rem;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-strong);
+    z-index: 20;
+}
+
+.user-menu[hidden] {
+    display: none;
+}
+
+.user-menu button {
+    width: 100%;
+    padding: 0.65rem 0.85rem;
+    border: 0;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+}
+
+.user-menu button:last-child {
+    border-bottom: 0;
+}
+
+.user-menu button:hover {
+    background: var(--surface-hover);
+}
+
 #content {
     flex: 1;
     padding: 2rem 2.5rem;
@@ -69,7 +176,8 @@ body {
 }
 
 .hero-title,
-#content h2 {
+#content h2,
+.modal-panel h2 {
     font-family: var(--font-heading);
     font-weight: 600;
     color: var(--text-main);
@@ -214,6 +322,22 @@ form > div.error,
 
 .error:not(:empty) { display: block; }
 
+.notice {
+    color: var(--text-secondary);
+    background: rgba(152, 166, 174, 0.08);
+    border-left: 2px solid var(--blue-gray);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    margin: 0 0 1rem 0;
+}
+
+.notice[hidden] { display: none; }
+
+.button-row {
+    display: flex;
+    gap: 0.5rem;
+}
+
 .module-action {
     display: inline-block;
     margin: 0 0 1.25rem 0.5rem;
@@ -232,4 +356,28 @@ form > div.error,
 .module-action:hover {
     border-color: var(--blue-gray);
     color: var(--text-main);
+}
+
+/* Login dialog: an overlay, so a session that expires mid-task (e.g. a
+   half-built cart) doesn't destroy the view underneath it. */
+#login-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+
+.modal-panel {
+    width: 100%;
+    max-width: 380px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-strong);
+    padding: 1.5rem;
+}
+
+.modal-panel form {
+    max-width: none;
 }
