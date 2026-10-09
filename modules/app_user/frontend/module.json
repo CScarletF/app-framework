@@ -7,8 +7,7 @@
         { "key": "username", "label": "Username" },
         { "key": "role", "label": "Role" },
         { "key": "active", "label": "Active" },
-        { "key": "locked_until", "label": "Locked Until" },
-        { "key": "created_at", "label": "Created" }
+        { "key": "locked_until", "label": "Locked Until", "format": "datetime" }
     ],
     "form": [
         { "key": "username", "label": "Username", "type": "text", "required": true },

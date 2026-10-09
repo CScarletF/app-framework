@@ -288,6 +288,60 @@ const App = {
             : '';
     },
 
+    // --- audit display (created_by / updated_by + timestamps) -------------------
+    // Fully automatic: any list whose rows carry created_by gets Created and
+    // Updated columns (username + time), with no per-module config.
+
+    _fmtDateTime(value) {
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return String(value ?? '');
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    },
+
+    // id -> username. Reads are open, so this works logged out too; {} when
+    // the app has no app_user module.
+    async _userMap() {
+        try {
+            const res = await fetch('/api/app_user');
+            if (!res.ok) return {};
+            const users = await res.json();
+            return Object.fromEntries(users.map(u => [String(u.id), u.username]));
+        } catch (_) {
+            return {};
+        }
+    },
+
+    // A NULL author means the row predates authentication (or auth was off).
+    _authorLabel(id, users) {
+        if (id === null || id === undefined || id === '') return '-';
+        return users[String(id)] ?? `#${id}`;
+    },
+
+    _auditCell(by, at, users) {
+        const when = at ? this._fmtDateTime(at) : '';
+        return `<td>${esc(this._authorLabel(by, users))}<span class="cell-sub">${esc(when)}</span></td>`;
+    },
+
+    // A grouped row (one recipe = several DB rows) shows the earliest
+    // creation and the latest update among its rows.
+    _groupAuditCells(groupRows, users) {
+        const byTime = (key) => (a, b) => new Date(a[key]) - new Date(b[key]);
+        const created = [...groupRows].sort(byTime('created_at'))[0];
+        const updated = [...groupRows].sort(byTime('updated_at')).pop();
+        return this._auditCell(created.created_by, created.created_at, users)
+            + this._auditCell(updated.updated_by, updated.updated_at, users);
+    },
+
+    _auditRows(row, users) {
+        return [
+            ['Created By', this._authorLabel(row.created_by, users)],
+            ['Created At', row.created_at ? this._fmtDateTime(row.created_at) : ''],
+            ['Updated By', this._authorLabel(row.updated_by, users)],
+            ['Updated At', row.updated_at ? this._fmtDateTime(row.updated_at) : ''],
+        ].map(([label, val]) => `<tr><th>${esc(label)}</th><td>${esc(val)}</td></tr>`).join('');
+    },
+
     // --- nav + module routing -------------------------------------------------
 
     _buildNav() {
@@ -346,7 +400,11 @@ const App = {
         // permission, plain deletes by "delete".
         const deleteAction = config.void_endpoint ? 'void' : 'delete';
 
-        const header = cols.map(c => `<th>${esc(c.label)}</th>`).join('');
+        const hasAudit = rows.length > 0 && 'created_by' in rows[0];
+        const users = hasAudit ? await this._userMap() : {};
+
+        const header = cols.map(c => `<th>${esc(c.label)}</th>`).join('')
+            + (hasAudit ? '<th>Created</th><th>Updated</th>' : '');
         const body = rows.map(row => {
             const cells = cols.map(c => {
                 const raw = row[c.key];
@@ -357,20 +415,27 @@ const App = {
                 let val = c.relation ? (lookups[c.key][String(raw)] ?? raw ?? '') : (raw ?? '');
                 if (c.format === 'number' && val !== '') {
                     val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                } else if (c.format === 'datetime' && val !== '') {
+                    val = this._fmtDateTime(val);
                 }
                 return `<td>${esc(val)}</td>`;
             }).join('');
 
-            let buttons = '';
-            if (config.detail_view) {
-                buttons += `<button data-action="view" data-id="${esc(row.id)}">View</button>`;
-            } else if (this.can(config.table, 'update')) {
+            // Every row gets a read-only View (reads are open); Edit is
+            // added for roles with update permission on modules that have
+            // no custom detail screen.
+            let buttons = `<button data-action="view" data-id="${esc(row.id)}">View</button>`;
+            if (!config.detail_view && this.can(config.table, 'update')) {
                 buttons += `<button data-action="edit" data-id="${esc(row.id)}">Edit</button>`;
             }
             if (this.can(config.table, deleteAction)) {
                 buttons += `<button data-action="delete" data-id="${esc(row.id)}">Delete</button>`;
             }
-            return `<tr>${cells}<td>${buttons}</td></tr>`;
+            const auditCells = hasAudit
+                ? this._auditCell(row.created_by, row.created_at, users)
+                    + this._auditCell(row.updated_by, row.updated_at, users)
+                : '';
+            return `<tr>${cells}${auditCells}<td>${buttons}</td></tr>`;
         }).join('');
 
         const actions = (config.actions ?? [])
@@ -404,7 +469,11 @@ const App = {
         content.querySelectorAll('[data-action="view"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 const row = await Api.get(config.table, btn.dataset.id);
-                this._renderDetail(config, row);
+                if (config.detail_view) {
+                    this._renderDetail(config, row);
+                } else {
+                    this._renderView(config, row);
+                }
             });
         });
         content.querySelectorAll('[data-action="edit"]').forEach(btn => {
@@ -464,6 +533,9 @@ const App = {
             (groups[key] ??= []).push(row);
         }
 
+        const hasAudit = rows.length > 0 && 'created_by' in rows[0];
+        const users = hasAudit ? await this._userMap() : {};
+
         const bodyRows = Object.entries(groups).map(([parentId, groupRows]) => {
             const parentLabel = parentLookup[parentId] ?? parentId;
             const ingredientsText = groupRows.map(r => {
@@ -482,6 +554,7 @@ const App = {
             return `<tr>
                 <td>${esc(parentLabel)}</td>
                 <td>${esc(ingredientsText)}</td>
+                ${hasAudit ? this._groupAuditCells(groupRows, users) : ''}
                 <td>${buttons}</td>
             </tr>`;
         }).join('');
@@ -491,7 +564,7 @@ const App = {
             ${this._readOnlyNotice()}
             ${canCreate ? `<button id="add-new">${esc(config.add_button_label ?? '+ New')}</button>` : ''}
             <table>
-                <thead><tr><th>${esc(parentField.label)}</th><th>Ingredients</th><th></th></tr></thead>
+                <thead><tr><th>${esc(parentField.label)}</th><th>Ingredients</th>${hasAudit ? '<th>Created</th><th>Updated</th>' : ''}<th></th></tr></thead>
                 <tbody>${bodyRows}</tbody>
             </table>
         `;
@@ -706,18 +779,74 @@ const App = {
         await fetchAndRender();
     },
 
+    // Read-only record screen for modules without a custom detail view:
+    // every form field and list column, then the audit block. Password
+    // fields are never shown (and hashed columns never reach the client).
+    async _renderView(config, row) {
+        const content = document.getElementById('content');
+        const users = await this._userMap();
+
+        const fields = [];
+        const seen = new Set();
+        for (const f of config.form ?? []) {
+            if (f.type === 'password') continue;
+            fields.push({
+                key: f.key,
+                label: f.label,
+                relation: f.relation,
+                format: f.format ?? (f.type === 'datetime-local' ? 'datetime' : undefined),
+            });
+            seen.add(f.key);
+        }
+        for (const c of config.columns ?? []) {
+            if (seen.has(c.key)) continue;
+            fields.push({ key: c.key, label: c.label, relation: c.relation, format: c.format });
+        }
+
+        const lookups = {};
+        for (const f of fields.filter(f => f.relation)) {
+            const items = await Api.list(f.relation.table);
+            lookups[f.key] = Object.fromEntries(
+                items.map(i => [String(i.id), i[f.relation.label_field]])
+            );
+        }
+
+        const bodyRows = fields.map(f => {
+            const raw = row[f.key];
+            let val = f.relation ? (lookups[f.key][String(raw)] ?? raw ?? '') : (raw ?? '');
+            if (f.format === 'number' && val !== '') {
+                val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            } else if (f.format === 'datetime' && val !== '') {
+                val = this._fmtDateTime(val);
+            }
+            return `<tr><th>${esc(f.label)}</th><td>${esc(val)}</td></tr>`;
+        }).join('');
+        const auditRows = 'created_by' in row ? this._auditRows(row, users) : '';
+
+        content.innerHTML = `
+            <h2 class="hero-title">${esc(config.label)} Detail</h2>
+            <table>${bodyRows}${auditRows}</table>
+            <button id="back">Back</button>
+        `;
+
+        content.querySelector('#back').addEventListener('click', () => this.showModule(config.table));
+    },
+
     async _renderDetail(config, row) {
         const content = document.getElementById('content');
         const endpoint = config.detail_endpoint.replace('{id}', row.id);
         const items = await fetch(endpoint).then(r => r.json());
+        const users = await this._userMap();
 
         const summaryRows = (config.detail_summary ?? []).map(f => {
             let val = row[f.key] ?? '';
             if (f.format === 'number' && val !== '') {
                 val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            } else if (f.format === 'datetime' && val !== '') {
+                val = this._fmtDateTime(val);
             }
             return `<tr><th>${esc(f.label)}</th><td>${esc(val)}</td></tr>`;
-        }).join('');
+        }).join('') + ('created_by' in row ? this._auditRows(row, users) : '');
 
         const itemRows = items.map(i => {
             const subtotal = (i.quantity * i.unit_price_at_sale).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

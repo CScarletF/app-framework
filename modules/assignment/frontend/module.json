@@ -7,8 +7,8 @@
         { "key": "equipment_id", "label": "Item",
           "relation": { "table": "equipment", "label_field": "name" } },
         { "key": "assigned_to", "label": "Assigned To" },
-        { "key": "assigned_at", "label": "Assigned At" },
-        { "key": "released_at", "label": "Released At" }
+        { "key": "assigned_at", "label": "Assigned At", "format": "datetime" },
+        { "key": "released_at", "label": "Released At", "format": "datetime" }
     ],
     "form": [
         { "key": "equipment_id", "label": "Item", "type": "relation", "required": true,
