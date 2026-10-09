@@ -36,6 +36,19 @@ shortfall for that product is allowed through, not just the overridden
 line's share. This mirrors the pre-existing aggregation behavior of
 required_decrement itself.
 
+PERMISSIONS (enforced by auth.py's before_request hook, not here):
+checkout declares ("sale", "create") and void declares ("sale", "void").
+Using "override": true additionally requires the ("sale", "override")
+permission, checked inline below because it depends on the request body.
+A role without it gets 403 for the WHOLE checkout, never a silent
+downgrade to a non-override sale.
+
+ATTRIBUTION: checkout stamps created_by/updated_by (auth.audit_values) on
+the sale, each sale_item, and every product whose stock it decrements;
+void stamps updated_by on every product it restocks. The helper returns
+nothing for tables without those columns, so this is safe before the
+audit-column migration has run.
+
 /api/sale/<id>/items is a read-only join, used by the frontend's detail
 ("View") screen -- crud.py's generic show() only returns the sale row
 itself, never its line items.
@@ -57,6 +70,8 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy import Table
+
+from auth import audit_values, can_current, requires
 
 
 def _json_error(message: str, code: int):
@@ -111,6 +126,7 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
     bp = Blueprint("sale_routes", __name__)
 
     @bp.post("/api/sale/checkout")
+    @requires("sale", "create")
     def checkout():
         payload = request.get_json(silent=True)
         if payload is None:
@@ -131,6 +147,9 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                 return _json_error("quantity must be a positive integer", 422)
             if "override" in entry and not isinstance(entry["override"], bool):
                 return _json_error("override must be a boolean", 422)
+
+        if any(entry.get("override") for entry in items) and not can_current("sale", "override"):
+            return _json_error("Forbidden: stock override requires a role with override permission", 403)
 
         with engine.begin() as conn:
             requested_product_ids = [entry["product_id"] for entry in items]
@@ -170,7 +189,11 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
             )
 
             sale_row = conn.execute(
-                sale.insert().values(total=total, payment_method=payment_method).returning(sale)
+                sale.insert().values(
+                    total=total,
+                    payment_method=payment_method,
+                    **audit_values(sale, creating=True),
+                ).returning(sale)
             ).mappings().first()
 
             for entry in items:
@@ -181,6 +204,7 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                         product_id=p["id"],
                         quantity=entry["quantity"],
                         unit_price_at_sale=p["price"],
+                        **audit_values(sale_item, creating=True),
                     )
                 )
 
@@ -188,7 +212,10 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                 conn.execute(
                     product.update()
                     .where(product.c.id == pid)
-                    .values(stock_quantity=product.c.stock_quantity - needed)
+                    .values(
+                        stock_quantity=product.c.stock_quantity - needed,
+                        **audit_values(product, creating=False),
+                    )
                 )
 
         return jsonify(dict(sale_row)), 201
@@ -209,6 +236,7 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
         return jsonify([dict(r) for r in rows])
 
     @bp.delete("/api/sale/<int:sale_id>/void")
+    @requires("sale", "void")
     def void_sale(sale_id):
         with engine.begin() as conn:
             sold_items = conn.execute(
@@ -230,7 +258,10 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                 conn.execute(
                     product.update()
                     .where(product.c.id == pid)
-                    .values(stock_quantity=product.c.stock_quantity + amount)
+                    .values(
+                        stock_quantity=product.c.stock_quantity + amount,
+                        **audit_values(product, creating=False),
+                    )
                 )
 
             conn.execute(sale_item.delete().where(sale_item.c.sale_id == sale_id))

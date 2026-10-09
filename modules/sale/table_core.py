@@ -19,4 +19,6 @@ table = Table(
     Column("sold_at", DateTime(timezone=True), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("created_by", Integer),
+    Column("updated_by", Integer),
 )

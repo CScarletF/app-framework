@@ -3,10 +3,28 @@
 // nav entry, a list view, and a form. A module never writes its own
 // render function -- if a module ever needs one, that's a deliberate
 // exception, not the normal path.
+//
+// AUTH (active only if the backend exposes /api/auth/me):
+//   - The bottom-left user area shows Log in, or the user with a menu
+//     (Change password, Log out).
+//   - /api/auth/me returns the role's allowed actions per table; buttons
+//     the role may not use are not rendered. This is cosmetic only: the
+//     backend enforces every permission on every mutating request.
+//   - A 401 on any mutation (session expired) opens the login dialog as
+//     an overlay, leaving the current view (e.g. a cart) intact.
+//
+// SECURITY: every value coming from data is HTML-escaped with esc()
+// before it enters a template. Never interpolate raw data into innerHTML.
+
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
 
 const App = {
     modules: [],   // [{ config, cssLoaded }]
     activeTable: null,
+    authEnabled: false,
+    auth: { authenticated: false, username: null, role: null, permissions: {} },
 
     async init() {
         const manifest = await fetch('modules.json').then(r => r.json());
@@ -19,7 +37,16 @@ const App = {
 
         this.modules.sort((a, b) => (a.config.order ?? 0) - (b.config.order ?? 0));
 
+        await this._loadAuth();
+        Api.onUnauthorized = () => this._sessionLost();
+
+        document.addEventListener('click', (e) => {
+            const menu = document.getElementById('user-menu');
+            if (menu && !menu.hidden && !e.target.closest('#user-area')) menu.hidden = true;
+        });
+
         this._buildNav();
+        this._renderUserArea();
 
         const defaultModule =
             this.modules.find(m => m.config.default) ?? this.modules[0];
@@ -37,6 +64,231 @@ const App = {
             }
         } catch (_) { /* no module.css, that's fine */ }
     },
+
+    // --- auth state ---------------------------------------------------------
+
+    async _loadAuth() {
+        try {
+            const res = await fetch('/api/auth/me');
+            if (!res.ok) {          // 404: this app has no app_user module
+                this.authEnabled = false;
+                return;
+            }
+            const body = await res.json();
+            this.authEnabled = true;
+            this.auth = body.authenticated
+                ? {
+                    authenticated: true,
+                    username: body.username,
+                    role: body.role,
+                    permissions: body.permissions ?? {},
+                }
+                : { authenticated: false, username: null, role: null, permissions: {} };
+        } catch (_) {
+            this.authEnabled = false;
+        }
+    },
+
+    // Without auth every action is available (the backend is then open
+    // too). With auth, only what /api/auth/me granted this role.
+    can(table, action) {
+        if (!this.authEnabled) return true;
+        return (this.auth.permissions[table] ?? []).includes(action);
+    },
+
+    async _sessionLost() {
+        await this._loadAuth();
+        this._renderUserArea();
+        this._showLoginModal('Login required or session expired. Log in, then retry your last action.',
+            { preserveView: true });
+    },
+
+    // --- user area, login dialog, password change --------------------------------
+
+    _renderUserArea() {
+        const area = document.getElementById('user-area');
+        if (!area) return;
+
+        if (!this.authEnabled) {
+            area.innerHTML = '';
+            return;
+        }
+
+        if (!this.auth.authenticated) {
+            area.innerHTML = `
+                <button type="button" class="user-button" id="user-button">
+                    <span class="user-avatar">?</span>
+                    <span class="user-meta">
+                        <span class="user-name">Log in</span>
+                        <span class="user-role">Read-only</span>
+                    </span>
+                </button>`;
+            area.querySelector('#user-button').addEventListener('click', () => this._showLoginModal());
+            return;
+        }
+
+        area.innerHTML = `
+            <div class="user-menu" id="user-menu" hidden>
+                <button type="button" id="menu-password">Change password</button>
+                <button type="button" id="menu-logout">Log out</button>
+            </div>
+            <button type="button" class="user-button" id="user-button">
+                <span class="user-avatar">${esc(this.auth.username.charAt(0).toUpperCase())}</span>
+                <span class="user-meta">
+                    <span class="user-name">${esc(this.auth.username)}</span>
+                    <span class="user-role">${esc(this.auth.role)}</span>
+                </span>
+            </button>`;
+
+        const menu = area.querySelector('#user-menu');
+        area.querySelector('#user-button').addEventListener('click', () => {
+            menu.hidden = !menu.hidden;
+        });
+        area.querySelector('#menu-password').addEventListener('click', () => {
+            menu.hidden = true;
+            this._renderChangePassword();
+        });
+        area.querySelector('#menu-logout').addEventListener('click', () => {
+            menu.hidden = true;
+            this._logout();
+        });
+    },
+
+    _showLoginModal(message = '', { preserveView = false } = {}) {
+        if (document.getElementById('login-overlay')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'login-overlay';
+        overlay.innerHTML = `
+            <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="login-title">
+                <h2 class="hero-title" id="login-title">Log in</h2>
+                ${message ? `<div class="notice">${esc(message)}</div>` : ''}
+                <form id="login-form">
+                    <label>Username
+                        <input name="username" type="text" autocomplete="username" required>
+                    </label>
+                    <label>Password
+                        <input name="password" type="password" autocomplete="current-password" required>
+                    </label>
+                    <div class="error" id="login-error"></div>
+                    <div class="button-row">
+                        <button type="submit">Log in</button>
+                        <button type="button" id="login-cancel">Cancel</button>
+                    </div>
+                </form>
+            </div>`;
+        document.body.appendChild(overlay);
+
+        function onKey(e) { if (e.key === 'Escape') close(); }
+        function close() {
+            overlay.remove();
+            document.removeEventListener('keydown', onKey);
+        }
+        document.addEventListener('keydown', onKey);
+
+        overlay.querySelector('#login-cancel').addEventListener('click', close);
+        overlay.querySelector('input[name="username"]').focus();
+
+        overlay.querySelector('#login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const errorEl = overlay.querySelector('#login-error');
+            errorEl.textContent = '';
+
+            const result = await Api.post(
+                '/api/auth/login',
+                {
+                    username: form.elements.username.value,
+                    password: form.elements.password.value,
+                },
+                { skipUnauthorized: true },
+            );
+
+            if (!result.ok) {
+                errorEl.textContent = result.body.error ?? 'Login failed';
+                form.elements.password.value = '';
+                return;
+            }
+
+            close();
+            await this._loadAuth();
+            this._renderUserArea();
+            // An explicit login re-renders so buttons match the new role.
+            // A re-login after expiry keeps the current view untouched.
+            if (!preserveView && this.activeTable) this.showModule(this.activeTable);
+        });
+    },
+
+    async _logout() {
+        await Api.post('/api/auth/logout', {}, { skipUnauthorized: true });
+        await this._loadAuth();
+        this._renderUserArea();
+        if (this.activeTable) this.showModule(this.activeTable);
+    },
+
+    _renderChangePassword() {
+        const content = document.getElementById('content');
+        content.innerHTML = `
+            <h2 class="hero-title">Change Password</h2>
+            <form id="password-form">
+                <label>Current password
+                    <input name="current_password" type="password" autocomplete="current-password" required>
+                </label>
+                <label>New password
+                    <input name="new_password" type="password" autocomplete="new-password" required>
+                </label>
+                <label>Confirm new password
+                    <input name="confirm_password" type="password" autocomplete="new-password" required>
+                </label>
+                <div class="error" id="password-error"></div>
+                <div class="notice" id="password-success" hidden></div>
+                <div class="button-row">
+                    <button type="submit">Save</button>
+                    <button type="button" id="cancel">Back</button>
+                </div>
+            </form>
+        `;
+
+        content.querySelector('#cancel').addEventListener('click', () => {
+            if (this.activeTable) this.showModule(this.activeTable);
+        });
+
+        content.querySelector('#password-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const errorEl = content.querySelector('#password-error');
+            const successEl = content.querySelector('#password-success');
+            errorEl.textContent = '';
+            successEl.hidden = true;
+
+            const current = form.elements.current_password.value;
+            const next = form.elements.new_password.value;
+            if (next !== form.elements.confirm_password.value) {
+                errorEl.textContent = 'New password and confirmation do not match';
+                return;
+            }
+
+            const result = await Api.post('/api/auth/password', {
+                current_password: current,
+                new_password: next,
+            });
+            if (!result.ok) {
+                errorEl.textContent = result.body.error ?? 'Password change failed';
+                return;
+            }
+            form.reset();
+            successEl.textContent = 'Password changed.';
+            successEl.hidden = false;
+        });
+    },
+
+    _readOnlyNotice() {
+        return (this.authEnabled && !this.auth.authenticated)
+            ? '<div class="notice">Read-only. Log in to make changes.</div>'
+            : '';
+    },
+
+    // --- nav + module routing -------------------------------------------------
 
     _buildNav() {
         const nav = document.getElementById('nav');
@@ -90,38 +342,50 @@ const App = {
             );
         }
 
-        const header = cols.map(c => `<th>${c.label}</th>`).join('');
+        // Void-style deletes (void_endpoint) are governed by the "void"
+        // permission, plain deletes by "delete".
+        const deleteAction = config.void_endpoint ? 'void' : 'delete';
+
+        const header = cols.map(c => `<th>${esc(c.label)}</th>`).join('');
         const body = rows.map(row => {
             const cells = cols.map(c => {
                 const raw = row[c.key];
                 if (c.key === 'status') {
                     const isActive = raw === 'in_use';
-                    return `<td><span class="status ${isActive ? 'status-active' : ''}">${raw ?? ''}</span></td>`;
+                    return `<td><span class="status ${isActive ? 'status-active' : ''}">${esc(raw)}</span></td>`;
                 }
                 let val = c.relation ? (lookups[c.key][String(raw)] ?? raw ?? '') : (raw ?? '');
                 if (c.format === 'number' && val !== '') {
                     val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
                 }
-                return `<td>${val}</td>`;
+                return `<td>${esc(val)}</td>`;
             }).join('');
-            const primaryAction = config.detail_view
-                ? `<button data-action="view" data-id="${row.id}">View</button>`
-                : `<button data-action="edit" data-id="${row.id}">Edit</button>`;
-            return `<tr>${cells}<td>${primaryAction}
-                <button data-action="delete" data-id="${row.id}">Delete</button>
-            </td></tr>`;
+
+            let buttons = '';
+            if (config.detail_view) {
+                buttons += `<button data-action="view" data-id="${esc(row.id)}">View</button>`;
+            } else if (this.can(config.table, 'update')) {
+                buttons += `<button data-action="edit" data-id="${esc(row.id)}">Edit</button>`;
+            }
+            if (this.can(config.table, deleteAction)) {
+                buttons += `<button data-action="delete" data-id="${esc(row.id)}">Delete</button>`;
+            }
+            return `<tr>${cells}<td>${buttons}</td></tr>`;
         }).join('');
 
         const actions = (config.actions ?? [])
-            .map(a => `<a class="module-action" href="${a.href}">${a.label}</a>`)
+            .map(a => `<a class="module-action" href="${esc(a.href)}">${esc(a.label)}</a>`)
             .join('');
 
         const addButtonLabel = config.add_button_label ?? (config.cart_checkout ? '+ New Sale' : '+ New');
-        const showAddButton = config.cart_checkout || config.multi_add || !config.hide_add;
+        const showAddButton =
+            (config.cart_checkout || config.multi_add || !config.hide_add)
+            && this.can(config.table, 'create');
 
         content.innerHTML = `
-            <h2 class="hero-title">${config.label}</h2>
-            ${showAddButton ? `<button id="add-new">${addButtonLabel}</button>` : ''}
+            <h2 class="hero-title">${esc(config.label)}</h2>
+            ${this._readOnlyNotice()}
+            ${showAddButton ? `<button id="add-new">${esc(addButtonLabel)}</button>` : ''}
             ${actions}
             <table><thead><tr>${header}<th></th></tr></thead><tbody>${body}</tbody></table>
         `;
@@ -152,10 +416,12 @@ const App = {
         content.querySelectorAll('[data-action="delete"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 if (!confirm('Delete this row?')) return;
-                if (config.void_endpoint) {
-                    await fetch(config.void_endpoint.replace('{id}', btn.dataset.id), { method: 'DELETE' });
-                } else {
-                    await Api.remove(config.table, btn.dataset.id);
+                const result = config.void_endpoint
+                    ? await Api.del(config.void_endpoint.replace('{id}', btn.dataset.id))
+                    : await Api.remove(config.table, btn.dataset.id);
+                if (!result.ok) {
+                    if (result.status !== 401) alert(result.body.error ?? 'Delete failed');
+                    return;
                 }
                 this.showModule(config.table);
             });
@@ -170,12 +436,18 @@ const App = {
     // editing a group always means re-specifying the whole set, per the
     // module's own semantics (a recipe's ingredient list isn't a
     // collection of independent facts, it's one definition).
+    // Editing a group deletes then recreates its rows, so it needs BOTH
+    // the delete and create permissions; deleting needs delete.
     async _renderGrouped(config, rows) {
         const content = document.getElementById('content');
         const parentField = config.multi_add_parent_field;
         const childRelation = config.multi_add_child_relation;
         const childKey = config.multi_add_child_key;
         const qtyKey = config.multi_add_quantity_key;
+
+        const canCreate = this.can(config.table, 'create');
+        const canDelete = this.can(config.table, 'delete');
+        const canEditGroup = canCreate && canDelete;
 
         const parentItems = await Api.list(parentField.relation.table);
         const parentLookup = Object.fromEntries(
@@ -199,26 +471,34 @@ const App = {
                 return `${childLabel} (${r[qtyKey]})`;
             }).join(', ');
             const ids = groupRows.map(r => r.id).join(',');
+
+            let buttons = '';
+            if (canEditGroup) {
+                buttons += `<button data-action="edit-group" data-parent="${esc(parentId)}" data-ids="${esc(ids)}">Edit</button>`;
+            }
+            if (canDelete) {
+                buttons += `<button data-action="delete-group" data-ids="${esc(ids)}">Delete</button>`;
+            }
             return `<tr>
-                <td>${parentLabel}</td>
-                <td>${ingredientsText}</td>
-                <td>
-                    <button data-action="edit-group" data-parent="${parentId}" data-ids="${ids}">Edit</button>
-                    <button data-action="delete-group" data-ids="${ids}">Delete</button>
-                </td>
+                <td>${esc(parentLabel)}</td>
+                <td>${esc(ingredientsText)}</td>
+                <td>${buttons}</td>
             </tr>`;
         }).join('');
 
         content.innerHTML = `
-            <h2 class="hero-title">${config.label}</h2>
-            <button id="add-new">${config.add_button_label ?? '+ New'}</button>
+            <h2 class="hero-title">${esc(config.label)}</h2>
+            ${this._readOnlyNotice()}
+            ${canCreate ? `<button id="add-new">${esc(config.add_button_label ?? '+ New')}</button>` : ''}
             <table>
-                <thead><tr><th>${parentField.label}</th><th>Ingredients</th><th></th></tr></thead>
+                <thead><tr><th>${esc(parentField.label)}</th><th>Ingredients</th><th></th></tr></thead>
                 <tbody>${bodyRows}</tbody>
             </table>
         `;
 
-        content.querySelector('#add-new').addEventListener('click', () => this._renderMultiAdd(config));
+        if (canCreate) {
+            content.querySelector('#add-new').addEventListener('click', () => this._renderMultiAdd(config));
+        }
 
         content.querySelectorAll('[data-action="edit-group"]').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -233,7 +513,12 @@ const App = {
             btn.addEventListener('click', async () => {
                 if (!confirm('Delete this recipe?')) return;
                 const ids = btn.dataset.ids.split(',');
-                await Promise.all(ids.map(id => Api.remove(config.table, id)));
+                const results = await Promise.all(ids.map(id => Api.remove(config.table, id)));
+                const failed = results.find(r => !r.ok);
+                if (failed) {
+                    if (failed.status !== 401) alert(failed.body.error ?? 'Delete failed');
+                    return;
+                }
                 this.showModule(config.table);
             });
         });
@@ -247,6 +532,8 @@ const App = {
     // When editingGroup is passed, all of its existing rows are deleted
     // first, then the freshly-specified set is created -- editing always
     // means re-specifying the whole set, never patching one child row.
+    // If any delete fails, creation is NOT attempted (it would duplicate
+    // the rows that survived).
     async _renderMultiAdd(config, editingGroup = null) {
         const content = document.getElementById('content');
         const parentField = config.multi_add_parent_field;
@@ -255,16 +542,16 @@ const App = {
         const qtyKey = config.multi_add_quantity_key;
         const qtyLabel = config.multi_add_quantity_label ?? 'Quantity';
 
-        const parentOptions = await fetch(`/api/${parentField.relation.table}`).then(r => r.json());
-        const childOptions = await fetch(`/api/${childRelation.table}`).then(r => r.json());
+        const parentOptions = await Api.list(parentField.relation.table);
+        const childOptions = await Api.list(childRelation.table);
 
         const parentOpts = parentOptions.map(p => {
             const selected = editingGroup && String(p.id) === String(editingGroup.parentValue) ? 'selected' : '';
-            return `<option value="${p.id}" ${selected}>${p[parentField.relation.label_field]}</option>`;
+            return `<option value="${esc(p.id)}" ${selected}>${esc(p[parentField.relation.label_field])}</option>`;
         }).join('');
 
         const childOptsHtml = (selectedValue) => childOptions.map(p =>
-            `<option value="${p.id}" ${String(p.id) === String(selectedValue) ? 'selected' : ''}>${p[childRelation.label_field]}</option>`
+            `<option value="${esc(p.id)}" ${String(p.id) === String(selectedValue) ? 'selected' : ''}>${esc(p[childRelation.label_field])}</option>`
         ).join('');
 
         let rowCount = 0;
@@ -276,7 +563,7 @@ const App = {
             const rowHtml = `
                 <div class="multi-add-row" data-row="${rowCount}">
                     <select data-child>${childOptsHtml(childValue)}</select>
-                    <input type="number" data-qty placeholder="${qtyLabel}" min="1" value="${qtyValue}" required>
+                    <input type="number" data-qty placeholder="${esc(qtyLabel)}" min="1" value="${esc(qtyValue)}" required>
                     <button type="button" data-remove-row>Remove</button>
                 </div>`;
             content.querySelector('#multi-add-rows').insertAdjacentHTML('beforeend', rowHtml);
@@ -285,8 +572,8 @@ const App = {
         };
 
         content.innerHTML = `
-            <h2 class="hero-title">${editingGroup ? 'Edit' : 'New'} ${config.label.replace(/s$/, '')}</h2>
-            <label>${parentField.label}
+            <h2 class="hero-title">${editingGroup ? 'Edit' : 'New'} ${esc(config.label.replace(/s$/, ''))}</h2>
+            <label>${esc(parentField.label)}
                 <select id="multi-add-parent" required>${parentOpts}</select>
             </label>
             <h2 class="hero-title">Ingredients</h2>
@@ -307,16 +594,24 @@ const App = {
         content.querySelector('#cancel').addEventListener('click', () => this.showModule(config.table));
 
         content.querySelector('#multi-add-submit').addEventListener('click', async () => {
+            const errorEl = content.querySelector('#multi-add-error');
             const parentValue = content.querySelector('#multi-add-parent').value;
             const rowEls = Array.from(content.querySelectorAll('.multi-add-row'));
 
             if (rowEls.length === 0) {
-                content.querySelector('#multi-add-error').textContent = 'Add at least one ingredient';
+                errorEl.textContent = 'Add at least one ingredient';
                 return;
             }
 
             if (editingGroup) {
-                await Promise.all(editingGroup.rows.map(r => Api.remove(config.table, r.id)));
+                const deletions = await Promise.all(
+                    editingGroup.rows.map(r => Api.remove(config.table, r.id))
+                );
+                const failed = deletions.find(d => !d.ok);
+                if (failed) {
+                    errorEl.textContent = failed.body.error ?? 'Could not replace the existing set';
+                    return;
+                }
             }
 
             const errors = [];
@@ -337,7 +632,7 @@ const App = {
             }
 
             if (errors.length > 0) {
-                content.querySelector('#multi-add-error').textContent = errors.join('; ');
+                errorEl.textContent = errors.join('; ');
                 return;
             }
             this.showModule(config.table);
@@ -358,7 +653,7 @@ const App = {
 
         const filterLabels = { start_date: 'From', end_date: 'To' };
         const filterInputsHtml = filters.map(f =>
-            `<label>${filterLabels[f] ?? f} <input type="date" data-filter="${f}"></label>`
+            `<label>${esc(filterLabels[f] ?? f)} <input type="date" data-filter="${esc(f)}"></label>`
         ).join('');
 
         const fetchAndRender = async () => {
@@ -371,14 +666,14 @@ const App = {
             const rows = await fetch(url).then(r => r.json());
 
             const cols = config.columns;
-            const header = cols.map(c => `<th>${c.label}</th>`).join('');
+            const header = cols.map(c => `<th>${esc(c.label)}</th>`).join('');
             const body = rows.map(row => {
                 const cells = cols.map(c => {
                     let val = row[c.key] ?? '';
                     if (c.format === 'number' && val !== '') {
                         val = fmt(val);
                     }
-                    return `<td>${val}</td>`;
+                    return `<td>${esc(val)}</td>`;
                 }).join('');
                 return `<tr>${cells}</tr>`;
             }).join('');
@@ -386,7 +681,7 @@ const App = {
             let summaryHtml = '';
             if (config.report_summary_key) {
                 const total = rows.reduce((sum, r) => sum + Number(r[config.report_summary_key] ?? 0), 0);
-                summaryHtml = `<p><strong>${config.report_summary_label ?? 'Total'}: ${fmt(total)}</strong></p>`;
+                summaryHtml = `<p><strong>${esc(config.report_summary_label ?? 'Total')}: ${esc(fmt(total))}</strong></p>`;
             }
 
             content.querySelector('#report-table-area').innerHTML = `
@@ -396,7 +691,7 @@ const App = {
         };
 
         content.innerHTML = `
-            <h2 class="hero-title">${config.label}</h2>
+            <h2 class="hero-title">${esc(config.label)}</h2>
             <div id="report-filters">
                 ${filterInputsHtml}
                 ${filters.length > 0 ? '<button id="report-apply">Apply</button>' : ''}
@@ -421,17 +716,17 @@ const App = {
             if (f.format === 'number' && val !== '') {
                 val = Number(val).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             }
-            return `<tr><th>${f.label}</th><td>${val}</td></tr>`;
+            return `<tr><th>${esc(f.label)}</th><td>${esc(val)}</td></tr>`;
         }).join('');
 
         const itemRows = items.map(i => {
             const subtotal = (i.quantity * i.unit_price_at_sale).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             const unitPrice = Number(i.unit_price_at_sale).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-            return `<tr><td>${i.product_name}</td><td>${i.quantity}</td><td>${unitPrice}</td><td>${subtotal}</td></tr>`;
+            return `<tr><td>${esc(i.product_name)}</td><td>${esc(i.quantity)}</td><td>${unitPrice}</td><td>${subtotal}</td></tr>`;
         }).join('');
 
         content.innerHTML = `
-            <h2 class="hero-title">${config.label} Detail</h2>
+            <h2 class="hero-title">${esc(config.label)} Detail</h2>
             <table>${summaryRows}</table>
             <h2 class="hero-title">Items</h2>
             <table>
@@ -451,6 +746,7 @@ const App = {
         const cart = {}; // product_id (string) -> { product, quantity, override }
         const paymentMethods = config.payment_methods ?? ['cash'];
         const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const canOverride = this.can(config.table, 'override');
 
         // productId -> [{ ingredient_product_id, quantity_required }, ...]
         const recipesByMenuItem = {};
@@ -492,11 +788,11 @@ const App = {
         const renderProductList = () => {
             const rows = products.map(p => `
                 <tr>
-                    <td>${p.category}</td>
-                    <td>${p.name}</td>
+                    <td>${esc(p.category)}</td>
+                    <td>${esc(p.name)}</td>
                     <td>${fmt(p.price)}</td>
-                    <td>${p.stock_quantity}</td>
-                    <td><button data-add="${p.id}">Add</button></td>
+                    <td>${esc(p.stock_quantity)}</td>
+                    <td><button data-add="${esc(p.id)}">Add</button></td>
                 </tr>
             `).join('');
             return `<table><thead><tr><th>Category</th><th>Name</th><th>Price</th><th>Stock</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
@@ -509,22 +805,25 @@ const App = {
                 const needsOverride = shortages.length > 0 && !e.override;
                 let stockNote = '';
                 if (needsOverride) {
-                    const detail = shortages.map(s => `${s.name}: need ${s.needed}, have ${s.available}`).join('; ');
-                    stockNote = `<br><span class="error" style="display:block;">Insufficient stock -- ${detail}. <button data-override="${e.product.id}">Override</button></span>`;
+                    const detail = shortages.map(s => `${esc(s.name)}: need ${esc(s.needed)}, have ${esc(s.available)}`).join('; ');
+                    const action = canOverride
+                        ? `<button data-override="${esc(e.product.id)}">Override</button>`
+                        : 'An admin must override or reduce the quantity.';
+                    stockNote = `<br><span class="error" style="display:block;">Insufficient stock -- ${detail}. ${action}</span>`;
                 } else if (shortages.length > 0 && e.override) {
                     stockNote = `<br><span style="color:var(--accent);">Override applied -- stock will go negative</span>`;
                 }
                 return `
                     <tr>
-                        <td>${e.product.name}${stockNote}</td>
+                        <td>${esc(e.product.name)}${stockNote}</td>
                         <td>
-                            <button data-decrement="${e.product.id}">-</button>
+                            <button data-decrement="${esc(e.product.id)}">-</button>
                             ${e.quantity}
-                            <button data-increment="${e.product.id}">+</button>
+                            <button data-increment="${esc(e.product.id)}">+</button>
                         </td>
                         <td>${fmt(e.product.price)}</td>
                         <td>${fmt(e.product.price * e.quantity)}</td>
-                        <td><button data-remove="${e.product.id}">Remove</button></td>
+                        <td><button data-remove="${esc(e.product.id)}">Remove</button></td>
                     </tr>
                 `;
             }).join('');
@@ -578,7 +877,7 @@ const App = {
             <div id="cart-area">${renderCartTable()}</div>
             <label>Payment Method
                 <select id="payment-method">
-                    ${paymentMethods.map(m => `<option value="${m}">${m}</option>`).join('')}
+                    ${paymentMethods.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
                 </select>
             </label>
             <div class="error" id="cart-error"></div>
@@ -621,15 +920,10 @@ const App = {
             }));
             const payment_method = content.querySelector('#payment-method').value;
 
-            const res = await fetch(config.checkout_endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ payment_method, items }),
-            });
-            const body = await res.json();
+            const res = await Api.post(config.checkout_endpoint, { payment_method, items });
 
             if (!res.ok) {
-                content.querySelector('#cart-error').textContent = body.error ?? 'Checkout failed';
+                content.querySelector('#cart-error').textContent = res.body.error ?? 'Checkout failed';
                 return;
             }
             this.showModule(config.table);
@@ -655,33 +949,42 @@ const App = {
                 }
 
                 const opts = items.map(i =>
-                    `<option value="${i.id}" ${String(i.id) === String(value) ? 'selected' : ''}>${i[f.relation.label_field]}</option>`
+                    `<option value="${esc(i.id)}" ${String(i.id) === String(value) ? 'selected' : ''}>${esc(i[f.relation.label_field])}</option>`
                 ).join('');
-                return `<label>${f.label}<select name="${f.key}" ${req}>${opts}</select></label>`;
+                return `<label>${esc(f.label)}<select name="${esc(f.key)}" ${req}>${opts}</select></label>`;
             }
             if (f.type === 'combo') {
                 const distinctValues = await fetch(`/api/${config.table}/distinct/${f.key}`).then(r => r.json());
                 const datalistId = `datalist-${f.key}`;
-                const opts = distinctValues.map(v => `<option value="${v}"></option>`).join('');
-                return `<label>${f.label}
-                    <input name="${f.key}" type="text" value="${value}" list="${datalistId}" ${req}>
-                    <datalist id="${datalistId}">${opts}</datalist>
+                const opts = distinctValues.map(v => `<option value="${esc(v)}"></option>`).join('');
+                return `<label>${esc(f.label)}
+                    <input name="${esc(f.key)}" type="text" value="${esc(value)}" list="${esc(datalistId)}" ${req}>
+                    <datalist id="${esc(datalistId)}">${opts}</datalist>
                 </label>`;
             }
             if (f.type === 'select') {
+                // String() on both sides: booleans from the API (true/false)
+                // must match the "true"/"false" option strings, otherwise an
+                // edit form silently preselects the first option.
                 const opts = f.options.map(o =>
-                    `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`
+                    `<option value="${esc(o)}" ${String(o) === String(value) ? 'selected' : ''}>${esc(o)}</option>`
                 ).join('');
-                return `<label>${f.label}<select name="${f.key}" ${req}>${opts}</select></label>`;
+                return `<label>${esc(f.label)}<select name="${esc(f.key)}" ${req}>${opts}</select></label>`;
             }
             if (f.type === 'textarea') {
-                return `<label>${f.label}<textarea name="${f.key}" ${req}>${value}</textarea></label>`;
+                return `<label>${esc(f.label)}<textarea name="${esc(f.key)}" ${req}>${esc(value)}</textarea></label>`;
             }
-            return `<label>${f.label}<input name="${f.key}" type="${f.type}" value="${value}" ${req}></label>`;
+            if (f.type === 'password') {
+                // Never prefilled. On edit, leaving it blank keeps the
+                // current password (empty fields are dropped on submit).
+                const placeholder = existing ? 'Leave blank to keep current' : '';
+                return `<label>${esc(f.label)}<input name="${esc(f.key)}" type="password" autocomplete="new-password" placeholder="${esc(placeholder)}" ${req}></label>`;
+            }
+            return `<label>${esc(f.label)}<input name="${esc(f.key)}" type="${esc(f.type)}" value="${esc(value)}" ${req}></label>`;
         }));
 
         content.innerHTML = `
-            <h2 class="hero-title">${existing ? 'Edit' : 'New'} ${config.label}</h2>
+            <h2 class="hero-title">${existing ? 'Edit' : 'New'} ${esc(config.label)}</h2>
             <form id="module-form">
                 ${fields.join('')}
                 <div class="error" id="form-error"></div>
@@ -704,7 +1007,8 @@ const App = {
                 : await Api.create(config.table, data);
 
             if (!result.ok) {
-                content.querySelector('#form-error').textContent = result.body.error ?? 'Save failed';
+                const errorEl = content.querySelector('#form-error');
+                if (errorEl) errorEl.textContent = result.body.error ?? 'Save failed';
                 return;
             }
             this.showModule(config.table);

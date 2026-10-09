@@ -11,8 +11,12 @@
 <body>
     <!-- Nav is built entirely at runtime by app.js from whichever
          modules' module.json files modules.json lists -- nothing about
-         which modules exist is hardcoded here. -->
-    <nav id="nav"></nav>
+         which modules exist is hardcoded here. #user-area (bottom of the
+         sidebar) is filled by app.js only when the backend has auth. -->
+    <aside id="sidebar">
+        <nav id="nav"></nav>
+        <div id="user-area"></div>
+    </aside>
     <main id="content"></main>
 
     <script src="api.js"></script>

@@ -17,6 +17,12 @@ needs both its own table and equipment's). Running this as a second pass
 means a module's routes.py can depend on another module's table
 regardless of directory iteration order.
 
+AUTH: after the first pass, init_auth wires login/session handling and the
+single before_request hook that guards every mutating request. It only
+activates if modules/app_user is present; otherwise the app runs exactly
+as before, unauthenticated. It sits between the passes only for clarity --
+app-level hooks apply to every blueprint regardless of registration order.
+
 Also registers export.py's framework-level multi-sheet Excel export,
 which covers every module's table -- not tied to any single module, so
 it's wired directly here rather than via a module's own routes.py.
@@ -24,11 +30,12 @@ it's wired directly here rather than via a module's own routes.py.
 
 import importlib.util
 import json
-import sys
+import os
 from pathlib import Path
 
 from flask import Flask, jsonify
 
+from auth import init_auth
 from db import get_engine
 from crud import build_module_blueprint
 from export import build_export_blueprint
@@ -63,8 +70,9 @@ def create_app() -> Flask:
     app = Flask(__name__)
     engine = get_engine()
 
-    seen_tables = {}   # table_name -> module_name, collision check
-    tables = {}        # table_name -> Table object, for cross-module routes.py
+    seen_tables = {}    # table_name -> module_name, collision check
+    tables = {}         # table_name -> Table object, for cross-module routes.py
+    table_configs = {}  # table_name -> parsed table.json, for auth + export
 
     for module_dir in sorted(p for p in MODULES_DIR.iterdir() if p.is_dir()):
         if module_dir.name.startswith("_"):
@@ -86,7 +94,12 @@ def create_app() -> Flask:
 
         table = _load_table_object(module_dir)
         tables[table_name] = table
+        table_configs[table_name] = config
         app.register_blueprint(build_module_blueprint(module_dir.name, table, config, engine))
+
+    # Auth wiring needs every table + config, so it runs after the first
+    # pass. Returns False (no-op) when modules/app_user isn't present.
+    auth_active = init_auth(app, engine, tables, table_configs, PROJECT_ROOT)
 
     # Second pass: optional routes.py per module, for cross-table logic
     # that doesn't fit generic CRUD. Runs after the loop above so every
@@ -105,14 +118,14 @@ def create_app() -> Flask:
     # Framework-level export, covers every module's table -- not tied to
     # any single module, registered directly here rather than via a
     # module's routes.py.
-    app.register_blueprint(build_export_blueprint(tables, engine))
+    app.register_blueprint(build_export_blueprint(tables, engine, table_configs))
 
     @app.get("/api/_health")
     def health():
         # Deliberately does NOT touch the database -- this endpoint is for
         # setup.py's verify step to confirm the app process itself is up,
         # independent of whether the DB/schema sync has happened yet.
-        return jsonify({"status": "ok", "modules": list(seen_tables.values())})
+        return jsonify({"status": "ok", "modules": list(seen_tables.values()), "auth": auth_active})
 
     return app
 
@@ -120,4 +133,7 @@ def create_app() -> Flask:
 app = create_app()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    # Werkzeug's debugger allows arbitrary code execution, so it follows
+    # .env's APP_DEBUG (false by default) instead of being hardcoded on.
+    debug = os.getenv("APP_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on")
+    app.run(host="0.0.0.0", port=8000, debug=debug)
