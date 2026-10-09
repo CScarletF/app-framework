@@ -238,6 +238,17 @@ module), the user area is hidden and all buttons render.
 All data values are HTML-escaped (`esc()` in `app.js`) before entering a
 template. Never interpolate raw data into `innerHTML`.
 
+Audit display is automatic and needs no per-module config. Any list whose
+rows carry `created_by` gets **Created** and **Updated** columns (username
+over timestamp; `-` when the author is NULL). Every row has a read-only
+**View** button (open to everyone, since reads are open) showing all form
+fields and columns plus a Created By / Created At / Updated By / Updated At
+block; modules with a custom detail screen (`sale`) get the same block
+there. Grouped modules (`recipe`) show the earliest creation and the latest
+update among the group's rows. Usernames are resolved from the open
+`GET /api/app_user`. The audit columns are derived from the rows, so an
+empty list shows none until its first row exists.
+
 ## Adding a module
 
 1. Copy `modules/_template/` to `modules/<name>/`.
@@ -356,6 +367,9 @@ Beyond the original `table`/`label`/`order`/`default`/`columns`/`form`/
   e.g. `11500.00` -> `11,500.00`). Applies at display time only; edit
   forms still show/submit the raw unformatted value, since a `<input
   type="number">` shouldn't contain commas.
+- `"format": "datetime"` -- renders a timestamp as `YYYY-MM-DD HH:mm` in
+  the browser's local time. Also applied automatically to `datetime-local`
+  form fields on the View screen.
 
 ### Optional `form` field `type` values
 
@@ -572,11 +586,10 @@ which takes `[{product_id, quantity}, ...]` and returns
   Password hashes are never exposed.
 - `created_by`/`updated_by` exist on every table but are nullable: rows
   created before authentication, or with it disabled, have no author.
-  They are filled from the session by `crud.py` and `sale/routes.py` and
-  are not displayed in the UI yet.
-- Not yet built: the read-only View screen for audit columns, keeping and
-  tagging voided sales instead of deleting them, and the `audit_log`
-  module.
+  They are filled from the session by `crud.py` and `sale/routes.py`; a
+  NULL author is displayed as `-`.
+- Not yet built: keeping and tagging voided sales instead of deleting
+  them, and the `audit_log` module.
 - The session cookie is not `Secure` by default (plain HTTP on a LAN).
 - Lockout is temporary but can be triggered deliberately against a known
   username.

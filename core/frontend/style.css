@@ -172,7 +172,7 @@ body {
 #content {
     flex: 1;
     padding: 2rem 2.5rem;
-    max-width: 960px;
+    max-width: 1100px;
 }
 
 .hero-title,
@@ -255,6 +255,13 @@ td button {
     padding: 0.3rem 0.6rem;
     font-size: 0.75rem;
     margin-right: 0.4rem;
+}
+
+.cell-sub {
+    display: block;
+    margin-top: 0.1rem;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
 }
 
 .status {

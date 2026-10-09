@@ -11,12 +11,12 @@
     "detail_endpoint": "/api/sale/{id}/items",
     "void_endpoint": "/api/sale/{id}/void",
     "detail_summary": [
-        { "key": "sold_at", "label": "Sold At" },
+        { "key": "sold_at", "label": "Sold At", "format": "datetime" },
         { "key": "payment_method", "label": "Payment Method" },
         { "key": "total", "label": "Total", "format": "number" }
     ],
     "columns": [
-        { "key": "sold_at", "label": "Sold At" },
+        { "key": "sold_at", "label": "Sold At", "format": "datetime" },
         { "key": "payment_method", "label": "Payment Method" },
         { "key": "total", "label": "Total", "format": "number" }
     ],
