@@ -1,0 +1,151 @@
+# One pod, two containers (app + web), replicas 1.
+#
+# Scheduling: jenkins is PREFERRED (weight 100), not required, so the pod
+# can still run on srv-deploy-eng if jenkins is down. The preference only
+# applies at scheduling time: after a failover the pod stays where it landed
+# until `kubectl rollout restart` (see core/k8s/README.md).
+#
+# Image names below are placeholders; the overlay rewrites them to the real
+# registry path and tag.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-framework
+  labels:
+    app.kubernetes.io/name: app-framework
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  # A new pod must become Ready before the old one is removed, so a bad
+  # image never takes the running app down. Two pods exist only briefly.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: app-framework
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: app-framework
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - jenkins
+      # Default is 300s before a pod on a dead node is evicted; 30s makes
+      # failover to the other node take about a minute instead of ~5.
+      tolerations:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: app
+          image: app-framework-app
+          ports:
+            - name: app
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secrets
+          env:
+            - name: GUNICORN_CMD_ARGS
+              value: "-w 2 --worker-tmp-dir /dev/shm --access-logfile -"
+          # /api/_health deliberately does not touch the database, so a
+          # Patroni failover never marks the pod unready.
+          startupProbe:
+            httpGet:
+              path: /api/_health
+              port: app
+            periodSeconds: 2
+            failureThreshold: 15
+          readinessProbe:
+            httpGet:
+              path: /api/_health
+              port: app
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/_health
+              port: app
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+        - name: web
+          image: app-framework-web
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          # Lets the Service stop routing before nginx exits during rollouts.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: nginx-tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-tmp
+          emptyDir:
+            sizeLimit: 32Mi

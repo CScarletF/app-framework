@@ -1,0 +1,11 @@
+# Allow-list, same idea as Dockerfile.app.dockerignore.
+*
+!core/frontend
+!core/k8s/nginx
+!modules
+
+# Only modules/<name>/frontend is used; drop backend files from the context.
+**/*.py
+**/*.sql
+modules/*/table.json
+**/__pycache__

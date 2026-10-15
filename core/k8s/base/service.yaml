@@ -1,0 +1,19 @@
+# NodePort: answers on every node's IP through kube-proxy, wherever the pod
+# runs, so a failover to the other node needs no client change.
+# No MetalLB/LoadBalancer is installed in this cluster, by design.
+# 30080 is also hardcoded in deploy_k8s.py's status check.
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-framework
+  labels:
+    app.kubernetes.io/name: app-framework
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: app-framework
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

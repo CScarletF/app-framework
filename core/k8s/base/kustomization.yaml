@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The namespace itself, the ConfigMap, and the Secrets are created by
+# deploy_k8s.py (they come from .env / k8s.env and must never be committed).
+# The overlay generated in .k8s-build/ sets the namespace, the image
+# references, and the preferred node.
+resources:
+  - deployment.yaml
+  - service.yaml

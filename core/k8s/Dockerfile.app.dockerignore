@@ -1,0 +1,12 @@
+# Allow-list: everything is excluded unless re-included below, so .env,
+# .git, k8s.env, and any stray secret can never enter the build context.
+*
+!requirements.txt
+!permissions.conf
+!core/backend
+!modules
+
+# Back-end image does not need the browser assets or bytecode caches.
+modules/*/frontend
+**/__pycache__
+**/*.pyc

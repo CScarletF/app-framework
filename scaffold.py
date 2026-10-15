@@ -8,9 +8,9 @@ app.py discovers whatever's physically present under modules/ at
 runtime. Table-name collisions are still caught, but at app startup
 (app.py), not here -- scaffold.py's only job is copying files.
 
-AUTH: authentication is active only if the app_user module is among the
-selected modules. Leaving it out is allowed (the app then runs with NO
-login at all), so scaffold.py prints a warning instead of refusing.
+AUTH: app_user is REQUIRED. Every module's table carries created_by /
+updated_by columns that reference app_user, so a scaffold without it
+could not create its tables. scaffold.py refuses instead of guessing.
 
 USAGE:
     python scaffold.py --out=../equipment-tracker
@@ -35,6 +35,7 @@ AUTH_MODULE = "app_user"
 ROOT_FILES_TO_COPY = [
     "requirements.txt", ".env.example", ".gitignore",
     "setup.conf", "setup.py", "permissions.conf",
+    "deploy_k8s.py", "k8s.env.example",
 ]
 
 
@@ -109,6 +110,11 @@ def main():
         print("ERROR: no modules selected (empty list).", file=sys.stderr)
         sys.exit(1)
     validate_modules(module_names)
+    if AUTH_MODULE not in module_names:
+        print(f"ERROR: '{AUTH_MODULE}' is required. Every module's table references it "
+              f"for created_by/updated_by, so the tables could not be created without it. "
+              f"Add it to --modules.", file=sys.stderr)
+        sys.exit(1)
 
     out_dir.mkdir(parents=True)
     copy_core(out_dir)
@@ -117,15 +123,10 @@ def main():
     copy_root_files(out_dir)
 
     print(f"Scaffolded app at {out_dir} with modules: {', '.join(module_names)}")
-    if AUTH_MODULE not in module_names:
-        print(f"\nWARNING: '{AUTH_MODULE}' was not selected. This app will run WITHOUT "
-              f"authentication: every request, including writes and deletes, will be open. "
-              f"Re-scaffold with '{AUTH_MODULE}' in --modules to enable login.", file=sys.stderr)
     print("\nNext steps:")
     print(f"  cd {out_dir}")
     print("  cp .env.example .env   # then fill in real DB credentials")
-    if AUTH_MODULE in module_names:
-        print("  # create the app_user table first (infrastructure repo: sudo scripts/setup.sh)")
+    print("  # create the module tables first (infrastructure repo: sudo scripts/setup.sh)")
     print("  python setup.py         # auth env, containers, schema sync, admin seed, verify")
 
 
