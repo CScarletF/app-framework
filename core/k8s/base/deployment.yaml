@@ -99,6 +99,14 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
             timeoutSeconds: 3
+          # Both containers delay shutdown by 5s. Without this one, gunicorn
+          # received SIGTERM at once and stopped listening while kube-proxy
+          # still listed the pod: measured 3 failed requests (502) in a
+          # 0.5s window out of 476 during a rollout restart.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           resources:
             requests:
               cpu: 100m
@@ -131,7 +139,8 @@ spec:
             periodSeconds: 10
             failureThreshold: 3
             timeoutSeconds: 3
-          # Lets the Service stop routing before nginx exits during rollouts.
+          # Lets the Service stop routing before nginx exits during rollouts
+          # (the app container has the same delay, see above).
           lifecycle:
             preStop:
               exec:
