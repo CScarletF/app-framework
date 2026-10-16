@@ -78,7 +78,9 @@ python deploy_k8s.py apply --tag <tag>   # redeploy or roll back to a given tag
   tree is refused unless `--allow-dirty`.
 - `DB_PASSWORD`, `SECRET_KEY` and `ADMIN_PASSWORD` go into a Secret, all other
   `.env` keys into a ConfigMap. Secrets are sent to `kubectl` on stdin.
-- `SECRET_KEY` is generated into `.env` if blank, same as `setup.py`.
+- `SECRET_KEY` is generated into `.env` if blank or shorter than 32
+  characters, and missing auth variables are appended with defaults. The
+  script is self-contained and does not import `setup.py`.
 - Use a read-only token (`read:packages`) for `GHCR_PULL_TOKEN`; the push
   token is only used by `docker login` on the build host.
 

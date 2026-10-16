@@ -42,6 +42,8 @@ import argparse
 import base64
 import json
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -51,9 +53,6 @@ import urllib.request
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT))
-
-import setup as app_setup  # reuses setup.py's .env provisioning (guarded by __main__)
 
 K8S_DIR = PROJECT_ROOT / "core" / "k8s"
 BUILD_DIR = PROJECT_ROOT / ".k8s-build"
@@ -81,6 +80,22 @@ PREFERRED_NODE_PATH = (
     "preferredDuringSchedulingIgnoredDuringExecution/0/preference/"
     "matchExpressions/0/values/0"
 )
+
+# Auth settings this script makes sure .env carries. Self-contained on
+# purpose: the Compose flow (setup.py) and this one are independent options
+# and must not import each other.
+AUTH_MODULE = "app_user"
+MIN_SECRET_LENGTH = 32
+ENV_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
+AUTH_ENV_DEFAULTS = {
+    "SESSION_LIFETIME_MINUTES": "480",
+    "SESSION_COOKIE_SECURE": "false",
+    "ADMIN_USERNAME": "admin",
+    "ADMIN_PASSWORD": "admin",
+    "LOGIN_MAX_ATTEMPTS": "5",
+    "LOGIN_LOCKOUT_MINUTES": "15",
+    "PASSWORD_MIN_LENGTH": "8",
+}
 
 K8S_DEFAULTS = {
     "K8S_REGISTRY": "",
@@ -273,6 +288,54 @@ def cmd_push(args):
     print(f"Pushed:\n  {app_image}\n  {web_image}")
 
 
+# --- segment: .env provisioning ---------------------------------------------------
+
+def ensure_auth_env() -> bool:
+    """Makes sure .env carries every auth setting: generates SECRET_KEY when
+    blank or shorter than 32 characters, appends missing variables with their
+    defaults. Existing values are never overwritten (SECRET_KEY aside).
+    Returns True if the file changed."""
+    if not ENV_FILE.exists():
+        die(".env not found. Copy .env.example to .env and fill in the DB credentials.")
+
+    lines = ENV_FILE.read_text().splitlines()
+    line_index = {}
+    for i, line in enumerate(lines):
+        match = ENV_LINE.match(line)
+        if match:
+            line_index[match.group(1)] = i
+
+    changed = False
+
+    secret_idx = line_index.get("SECRET_KEY")
+    current = lines[secret_idx].split("=", 1)[1].strip() if secret_idx is not None else ""
+    if len(current) < MIN_SECRET_LENGTH:
+        new_line = f"SECRET_KEY={secrets.token_hex(32)}"
+        if secret_idx is None:
+            lines.append(new_line)
+        else:
+            lines[secret_idx] = new_line
+        changed = True
+        print(f"Generated SECRET_KEY in .env (was missing or shorter than {MIN_SECRET_LENGTH} characters).")
+
+    missing = [(k, v) for k, v in AUTH_ENV_DEFAULTS.items() if k not in line_index]
+    if missing:
+        lines.append("")
+        lines.append("# --- Authentication (added by deploy_k8s.py) ---")
+        for key, value in missing:
+            lines.append(f"{key}={value}")
+        changed = True
+        print(f"Added missing auth settings to .env: {', '.join(k for k, _ in missing)}")
+
+    if changed:
+        ENV_FILE.write_text("\n".join(lines) + "\n")
+        try:
+            os.chmod(ENV_FILE, 0o600)
+        except OSError:
+            pass
+    return changed
+
+
 # --- segment: namespace, config, secrets ---------------------------------------
 
 def namespace_manifest(namespace: str) -> dict:
@@ -297,10 +360,8 @@ def cmd_config(args):
     require_tools("kubectl")
     namespace = settings["K8S_NAMESPACE"]
 
-    # Same provisioning setup.py does: generates SECRET_KEY if blank, adds
-    # missing auth variables. Keeps the two deployment paths consistent.
-    if app_setup.auth_module_present(app_setup.load_setup_conf()):
-        app_setup.ensure_auth_env()
+    if (PROJECT_ROOT / "modules" / AUTH_MODULE).is_dir():
+        ensure_auth_env()
 
     env = read_env_file(ENV_FILE)
     if not env:
