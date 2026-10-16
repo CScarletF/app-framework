@@ -1,3 +1,7 @@
+# NOTE: the label differs on purpose. The Service and Deployment select
+# app.kubernetes.io/name=app-framework; a Job pod carrying that label would
+# receive web traffic (no readiness probe) while it runs.
+#
 # One-shot admin seeding, same logic as setup.py's seed step: creates the
 # .env admin only if no admin exists. Idempotent; deploy_k8s.py deletes the
 # previous Job before re-applying (Job specs are immutable).
@@ -6,14 +10,14 @@ kind: Job
 metadata:
   name: seed-admin
   labels:
-    app.kubernetes.io/name: app-framework
+    app.kubernetes.io/name: app-framework-seed
 spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: app-framework
+        app.kubernetes.io/name: app-framework-seed
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false

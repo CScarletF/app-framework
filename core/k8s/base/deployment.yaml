@@ -74,6 +74,8 @@ spec:
           env:
             - name: GUNICORN_CMD_ARGS
               value: "-w 2 --worker-tmp-dir /dev/shm --access-logfile -"
+          # timeoutSeconds 3 (default is 1): gunicorn's first answer after a cold
+          # start can exceed 1s, which showed up as a harmless Startup probe warning.
           # /api/_health deliberately does not touch the database, so a
           # Patroni failover never marks the pod unready.
           startupProbe:
@@ -82,18 +84,21 @@ spec:
               port: app
             periodSeconds: 2
             failureThreshold: 15
+            timeoutSeconds: 3
           readinessProbe:
             httpGet:
               path: /api/_health
               port: app
             periodSeconds: 5
             failureThreshold: 3
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
               path: /api/_health
               port: app
             periodSeconds: 10
             failureThreshold: 3
+            timeoutSeconds: 3
           resources:
             requests:
               cpu: 100m
@@ -118,12 +123,14 @@ spec:
               port: http
             periodSeconds: 5
             failureThreshold: 3
+            timeoutSeconds: 3
           livenessProbe:
             httpGet:
               path: /
               port: http
             periodSeconds: 10
             failureThreshold: 3
+            timeoutSeconds: 3
           # Lets the Service stop routing before nginx exits during rollouts.
           lifecycle:
             preStop:
