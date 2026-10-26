@@ -1,3 +1,6 @@
+> Branch: k8s-migration (Kubernetes deployment). main is the Docker-first branch and this
+> branch is intentionally never merged into main. See "Branches and workflow" below.
+
 # app-framework
 
 Reusable base for internal logistics/business apps. This repo is
@@ -13,6 +16,7 @@ core/                   never forked or copied per-app
                          sync_tables.py, seed_admin.py
   frontend/               generic HTML/CSS/JS engine, no per-app logic
   docker/                 Dockerfile, nginx conf, docker-compose.yml
+  k8s/                    Kubernetes images, manifests (this branch only)
 
 modules/                one folder per module, pick-and-choose per app
   equipment/
@@ -29,6 +33,8 @@ setup.conf                paths/locations setup.py needs (not secrets -- those a
 permissions.conf          per-deployment role permissions (see Authentication)
 scaffold.py                builds a new app repo from core/ + selected modules
 setup.py                   brings a scaffolded app from copied-files to running
+deploy_k8s.py              builds and deploys the app to Kubernetes (this branch only)
+k8s.env.example            registry, namespace, preferred node (this branch only)
 ```
 
 ## Building a new app
@@ -78,6 +84,75 @@ never applied by that role -- they need a one-off migration script (see
 `drop_stock_check.sql` in the infrastructure repo for the pattern). The
 audit columns on the six original tables were added this way
 (`add_audit_columns.sql`, run by `scripts/migrate_audit_columns.sh`).
+
+## Branches and workflow
+
+```
+main            Docker Compose is the primary deployment. Framework fixes land here first.
+k8s-migration   main plus the Kubernetes deployment. Never merged into main.
+```
+
+- Do not open a pull request from k8s-migration into main and do not merge it.
+  main stays Docker-first; the Kubernetes files exist only on this branch.
+- Changes flow one way, main -> k8s-migration:
+
+```
+git checkout k8s-migration
+git merge main
+git push origin k8s-migration
+```
+
+- A change that applies to both deployments (framework code, modules,
+  authentication, documentation shared by both) is made on main, or
+  cherry-picked onto main, and then merged into this branch.
+- Kubernetes-only changes (core/k8s/, deploy_k8s.py, k8s.env.example, the k8s
+  lines in .gitignore and scaffold.py) are committed on this branch only.
+- Images deployed from this branch are tagged with this branch's commit hash.
+  Release tags for this branch use the prefix k8s-v.
+- Policy check: `git log --oneline origin/main..origin/k8s-migration` lists the
+  Kubernetes commits, and `git branch --merged main` must not list k8s-migration.
+
+## Kubernetes deployment (this branch)
+
+A second deployment option beside Docker Compose; the Compose files are
+untouched. Details, scheduling, security posture and limitations are in
+core/k8s/README.md.
+
+```
+client -> <either node IP>:30080 (NodePort, kube-proxy)
+       -> pod app-framework (1 replica, preferred node jenkins)
+            web container: nginx :8080 -> static files, /api/ -> 127.0.0.1:8000
+            app container: gunicorn :8000 -> 192.168.20.190:5000 (Postgres VIP)
+```
+
+Requirements: a cluster with a CNI, kube-proxy and CoreDNS; `kubectl` on the
+control node; Docker with BuildKit on the build host; a registry (GHCR);
+`modules/<name>/table_core.py` committed for every module; `.env` (same file
+Compose uses) and `k8s.env` (copy `k8s.env.example`).
+
+Build host (jenkins), clean git tree on this branch:
+
+```
+python3 deploy_k8s.py build
+python3 deploy_k8s.py push
+```
+
+Control node (srv-deploy-eng), this branch checked out:
+
+```
+python3 deploy_k8s.py config
+python3 deploy_k8s.py apply --tag <commit hash of the images>
+python3 deploy_k8s.py seed  --tag <commit hash of the images>
+python3 deploy_k8s.py status
+```
+
+- `--tag` is required whenever the checkout's commit differs from the commit
+  the images were built from, for example after a documentation-only commit.
+- The control node must keep swap disabled. systemd's GPT auto-generator
+  re-enables a swap partition at boot unless its units are masked, and kubelet
+  refuses to start with swap on.
+- After a failover the pod stays on the node it moved to. Move it back with
+  `kubectl -n app-framework rollout restart deploy/app-framework`.
 
 ## Authentication
 
