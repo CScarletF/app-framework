@@ -21,4 +21,6 @@ table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("created_by", Integer),
     Column("updated_by", Integer),
+    Column("voided_at", DateTime(timezone=True)),
+    Column("voided_by", Integer),
 )

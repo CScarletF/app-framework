@@ -10,6 +10,9 @@
     "detail_view": true,
     "detail_endpoint": "/api/sale/{id}/items",
     "void_endpoint": "/api/sale/{id}/void",
+    "void_flag_field": "voided_at",
+    "void_by_field": "voided_by",
+    "purge_endpoint": "/api/sale/{id}/remove",
     "detail_summary": [
         { "key": "sold_at", "label": "Sold At", "format": "datetime" },
         { "key": "payment_method", "label": "Payment Method" },

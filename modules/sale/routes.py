@@ -37,7 +37,8 @@ line's share. This mirrors the pre-existing aggregation behavior of
 required_decrement itself.
 
 PERMISSIONS (enforced by auth.py's before_request hook, not here):
-checkout declares ("sale", "create") and void declares ("sale", "void").
+checkout declares ("sale", "create"), void declares ("sale", "void") and
+remove declares ("sale", "delete").
 Using "override": true additionally requires the ("sale", "override")
 permission, checked inline below because it depends on the request body.
 A role without it gets 403 for the WHOLE checkout, never a silent
@@ -45,33 +46,41 @@ downgrade to a non-override sale.
 
 ATTRIBUTION: checkout stamps created_by/updated_by (auth.audit_values) on
 the sale, each sale_item, and every product whose stock it decrements;
-void stamps updated_by on every product it restocks. The helper returns
-nothing for tables without those columns, so this is safe before the
-audit-column migration has run.
+void stamps updated_by on the sale and on every product it restocks. The
+helper returns nothing for tables without those columns, so this is safe
+before the audit-column migration has run.
 
 /api/sale/<id>/items is a read-only join, used by the frontend's detail
 ("View") screen -- crud.py's generic show() only returns the sale row
 itself, never its line items.
 
-/api/sale/<id>/void reverses checkout's stock effects before deleting the
-sale (sale_item.sale_id -> sale(id) is ON DELETE RESTRICT -- a bare
-delete would fail, and even if it didn't, it would never give back the
-stock checkout took). It re-resolves each sale_item's product through the
-CURRENT recipe table, the same way checkout does, since no snapshot of
-"what a recipe looked like at sale time" is stored anywhere -- unlike
-unit_price_at_sale, which IS snapshotted. If a recipe is edited between a
-sale and its void, the restock follows the edited recipe, not the
-original one. Accepted limitation; a full fix would mean snapshotting
-resolved ingredient decrements into sale_item at checkout time, which is
-a schema change beyond what void's current shape covers.
+VOID (POST /api/sale/<id>/void) is keep-and-tag: it sets voided_at and
+voided_by on the sale and gives the stock back, but the sale and its
+sale_item rows STAY, so the sale remains visible, tagged as voided, and
+its View screen still shows what was voided. A sale can be voided once
+(a second attempt answers 409), which is also what guarantees stock is
+restored exactly once. Restock re-resolves each sale_item's product
+through the CURRENT recipe table, the same way checkout does, since no
+snapshot of "what a recipe looked like at sale time" is stored anywhere
+-- unlike unit_price_at_sale, which IS snapshotted. If a recipe is
+edited between a sale and its void, the restock follows the edited
+recipe, not the original one. Accepted limitation; a full fix would mean
+snapshotting resolved ingredient decrements into sale_item at checkout
+time, which is a schema change beyond what void's current shape covers.
+
+REMOVE (DELETE /api/sale/<id>/remove) permanently deletes a sale, and
+ONLY a voided one (409 otherwise). It never touches stock: the void
+already restored it. sale_item.sale_id -> sale(id) is ON DELETE
+RESTRICT, so the line items are deleted first, inside the same
+transaction. The generic DELETE /api/sale/<id> is not used by the UI.
 """
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.engine import Engine
 from sqlalchemy import Table
 
-from auth import audit_values, can_current, requires
+from auth import audit_values, can_current, current_user_id, requires
 
 
 def _json_error(message: str, code: int):
@@ -235,19 +244,27 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
             ).mappings().all()
         return jsonify([dict(r) for r in rows])
 
-    @bp.delete("/api/sale/<int:sale_id>/void")
+    @bp.post("/api/sale/<int:sale_id>/void")
     @requires("sale", "void")
     def void_sale(sale_id):
         with engine.begin() as conn:
+            # Row lock: two concurrent voids of the same sale serialize,
+            # and the loser sees voided_at already set and answers 409
+            # instead of restocking twice.
+            sale_row = conn.execute(
+                select(sale.c.id, sale.c.voided_at)
+                .where(sale.c.id == sale_id)
+                .with_for_update()
+            ).mappings().first()
+            if sale_row is None:
+                return _json_error("Not found", 404)
+            if sale_row["voided_at"] is not None:
+                return _json_error("Sale is already voided", 409)
+
             sold_items = conn.execute(
                 select(sale_item.c.product_id, sale_item.c.quantity)
                 .where(sale_item.c.sale_id == sale_id)
             ).mappings().all()
-
-            if not sold_items:
-                existing = conn.execute(select(sale.c.id).where(sale.c.id == sale_id)).first()
-                if existing is None:
-                    return _json_error("Not found", 404)
 
             restock = _resolve_stock_impact(
                 conn, recipe,
@@ -264,12 +281,35 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                     )
                 )
 
-            conn.execute(sale_item.delete().where(sale_item.c.sale_id == sale_id))
-            result = conn.execute(sale.delete().where(sale.c.id == sale_id).returning(sale.c.id))
-            deleted = result.first()
+            conn.execute(
+                sale.update()
+                .where(sale.c.id == sale_id)
+                .values(
+                    voided_at=func.now(),
+                    voided_by=current_user_id(),
+                    **audit_values(sale, creating=False),
+                )
+            )
 
-        if deleted is None:
-            return _json_error("Not found", 404)
         return jsonify({"voided": True, "restocked_items": len(sold_items)})
+
+    @bp.delete("/api/sale/<int:sale_id>/remove")
+    @requires("sale", "delete")
+    def remove_sale(sale_id):
+        with engine.begin() as conn:
+            sale_row = conn.execute(
+                select(sale.c.id, sale.c.voided_at)
+                .where(sale.c.id == sale_id)
+                .with_for_update()
+            ).mappings().first()
+            if sale_row is None:
+                return _json_error("Not found", 404)
+            if sale_row["voided_at"] is None:
+                return _json_error("Only a voided sale can be deleted. Void it first.", 409)
+
+            conn.execute(sale_item.delete().where(sale_item.c.sale_id == sale_id))
+            conn.execute(sale.delete().where(sale.c.id == sale_id))
+
+        return jsonify({"deleted": True})
 
     return bp

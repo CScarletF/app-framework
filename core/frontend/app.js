@@ -396,9 +396,12 @@ const App = {
             );
         }
 
-        // Void-style deletes (void_endpoint) are governed by the "void"
-        // permission, plain deletes by "delete".
-        const deleteAction = config.void_endpoint ? 'void' : 'delete';
+        // Keep-and-tag void mode (void_endpoint + void_flag_field): an
+        // active row offers Void (governed by the "void" permission); a
+        // voided row is tagged and offers a permanent Delete via
+        // purge_endpoint (governed by the "delete" permission). Without
+        // void_endpoint, Delete is the plain generic delete.
+        const voidMode = !!config.void_endpoint && !!config.void_flag_field;
 
         const hasAudit = rows.length > 0 && 'created_by' in rows[0];
         const users = hasAudit ? await this._userMap() : {};
@@ -406,7 +409,12 @@ const App = {
         const header = cols.map(c => `<th>${esc(c.label)}</th>`).join('')
             + (hasAudit ? '<th>Created</th><th>Updated</th>' : '');
         const body = rows.map(row => {
-            const cells = cols.map(c => {
+            const isVoided = voidMode
+                && row[config.void_flag_field] !== null
+                && row[config.void_flag_field] !== undefined
+                && row[config.void_flag_field] !== '';
+
+            const cells = cols.map((c, idx) => {
                 const raw = row[c.key];
                 if (c.key === 'status') {
                     const isActive = raw === 'in_use';
@@ -418,7 +426,10 @@ const App = {
                 } else if (c.format === 'datetime' && val !== '') {
                     val = this._fmtDateTime(val);
                 }
-                return `<td>${esc(val)}</td>`;
+                const voidTag = (idx === 0 && isVoided)
+                    ? ' <span class="status">voided</span>'
+                    : '';
+                return `<td>${esc(val)}${voidTag}</td>`;
             }).join('');
 
             // Every row gets a read-only View (reads are open); Edit is
@@ -428,7 +439,14 @@ const App = {
             if (!config.detail_view && this.can(config.table, 'update')) {
                 buttons += `<button data-action="edit" data-id="${esc(row.id)}">Edit</button>`;
             }
-            if (this.can(config.table, deleteAction)) {
+            if (voidMode) {
+                if (!isVoided && this.can(config.table, 'void')) {
+                    buttons += `<button data-action="void" data-id="${esc(row.id)}">Void</button>`;
+                }
+                if (isVoided && config.purge_endpoint && this.can(config.table, 'delete')) {
+                    buttons += `<button data-action="purge" data-id="${esc(row.id)}">Delete</button>`;
+                }
+            } else if (this.can(config.table, 'delete')) {
                 buttons += `<button data-action="delete" data-id="${esc(row.id)}">Delete</button>`;
             }
             const auditCells = hasAudit
@@ -485,9 +503,29 @@ const App = {
         content.querySelectorAll('[data-action="delete"]').forEach(btn => {
             btn.addEventListener('click', async () => {
                 if (!confirm('Delete this row?')) return;
-                const result = config.void_endpoint
-                    ? await Api.del(config.void_endpoint.replace('{id}', btn.dataset.id))
-                    : await Api.remove(config.table, btn.dataset.id);
+                const result = await Api.remove(config.table, btn.dataset.id);
+                if (!result.ok) {
+                    if (result.status !== 401) alert(result.body.error ?? 'Delete failed');
+                    return;
+                }
+                this.showModule(config.table);
+            });
+        });
+        content.querySelectorAll('[data-action="void"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!confirm('Void this record? Stock is given back and the record stays on file, tagged as voided.')) return;
+                const result = await Api.post(config.void_endpoint.replace('{id}', btn.dataset.id));
+                if (!result.ok) {
+                    if (result.status !== 401) alert(result.body.error ?? 'Void failed');
+                    return;
+                }
+                this.showModule(config.table);
+            });
+        });
+        content.querySelectorAll('[data-action="purge"]').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!confirm('Permanently delete this voided record? This cannot be undone.')) return;
+                const result = await Api.del(config.purge_endpoint.replace('{id}', btn.dataset.id));
                 if (!result.ok) {
                     if (result.status !== 401) alert(result.body.error ?? 'Delete failed');
                     return;
@@ -838,6 +876,16 @@ const App = {
         const items = await fetch(endpoint).then(r => r.json());
         const users = await this._userMap();
 
+        // Void block (keep-and-tag modules): status, when and by whom.
+        let voidRows = '';
+        const voidedAt = config.void_flag_field ? row[config.void_flag_field] : null;
+        if (voidedAt) {
+            const byKey = config.void_by_field ?? 'voided_by';
+            voidRows = `<tr><th>Status</th><td>voided</td></tr>`
+                + `<tr><th>Voided At</th><td>${esc(this._fmtDateTime(voidedAt))}</td></tr>`
+                + `<tr><th>Voided By</th><td>${esc(this._authorLabel(row[byKey], users))}</td></tr>`;
+        }
+
         const summaryRows = (config.detail_summary ?? []).map(f => {
             let val = row[f.key] ?? '';
             if (f.format === 'number' && val !== '') {
@@ -846,7 +894,7 @@ const App = {
                 val = this._fmtDateTime(val);
             }
             return `<tr><th>${esc(f.label)}</th><td>${esc(val)}</td></tr>`;
-        }).join('') + ('created_by' in row ? this._auditRows(row, users) : '');
+        }).join('') + voidRows + ('created_by' in row ? this._auditRows(row, users) : '');
 
         const itemRows = items.map(i => {
             const subtotal = (i.quantity * i.unit_price_at_sale).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

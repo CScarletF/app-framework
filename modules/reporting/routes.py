@@ -15,6 +15,12 @@ different prices, not one blended average. Grouping on unit_price_at_sale
 reason sale_item snapshots it in the first place: a later price change
 must not blend or reinterpret historical sales.
 
+VOIDED SALES are excluded (sale.voided_at IS NULL): a voided sale is kept
+on record but its stock was given back and it is not revenue. The filter
+is skipped while the sale table has no voided_at column yet (before the
+void-column migration and table_core.py regeneration), so the report
+keeps working during rollout.
+
 start_date is inclusive from midnight; end_date is inclusive through the
 end of that calendar day (implemented as < end_date + 1 day, not <=
 end_date, since sold_at is a timestamp, not a bare date).
@@ -53,6 +59,9 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
         end_date_str = request.args.get("end_date")
 
         conditions = []
+
+        if "voided_at" in sale.c:
+            conditions.append(sale.c.voided_at.is_(None))
 
         if start_date_str:
             start_date, error = _parse_date_arg(start_date_str, "start_date")

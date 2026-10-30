@@ -1,5 +1,6 @@
 {
     "table": "sale",
     "required": ["total", "payment_method"],
-    "allowed_values": {}
+    "allowed_values": {},
+    "readonly_fields": ["voided_at", "voided_by"]
 }
