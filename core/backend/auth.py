@@ -1,6 +1,7 @@
 """
 auth.py -- authentication, authorization, and admin seeding. Framework
-level: nothing here knows about any module except the auth table itself.
+level: nothing here knows about any module except the auth table itself
+(and the audit_log table, which no role may ever write through the API).
 
 Enabled only when modules/app_user is present (app.py calls init_auth,
 which returns False and does nothing otherwise), so scaffolds that don't
@@ -28,8 +29,12 @@ PERMISSION LAYERS (consulted per role, first layer naming that role wins)
     table.json        "permissions"     module default
     permissions.conf  default           framework-wide default
     HARD_DEFAULT                        admin everything, staff nothing
-Hard invariants on the auth table regardless of config: staff have no
-actions on it, admin always keeps create and update.
+Hard invariants regardless of config: on the auth table staff have no
+actions and admin always keeps create and update; on the audit_log table
+no role has any action (it is written only by server code).
+
+AUDITING: a password change is recorded in audit_log (the value is never
+logged). Login and logout are not logged.
 """
 
 import hashlib
@@ -44,6 +49,8 @@ from sqlalchemy import Table, case, func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from audit import AUDIT_TABLE, record
 
 AUTH_TABLE = "app_user"
 ROLES = ("admin", "staff")
@@ -275,6 +282,10 @@ def _build_permissions(table_configs: dict, project_root: Path) -> dict:
             role_sets["staff"] = set()
             role_sets["admin"] |= {"create", "update"}
 
+        if table_name == AUDIT_TABLE:
+            # Written only by server code; no role may act on it.
+            role_sets = {role: set() for role in ROLES}
+
         result[table_name] = role_sets
     return result
 
@@ -475,6 +486,7 @@ def _build_blueprint(engine: Engine, user_table: Table) -> Blueprint:
                 update(t).where(t.c.id == user["id"])
                 .values(password_hash=new_hash, updated_by=user["id"])
             )
+            record(conn, "update", AUTH_TABLE, user["id"], "changed own password (value hidden)")
         session["pwf"] = _fingerprint(new_hash)  # keep THIS session alive
         return jsonify({"ok": True})
 

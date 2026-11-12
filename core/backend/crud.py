@@ -23,11 +23,21 @@ Optional table.json keys handled here:
   readonly_fields  -- columns the client may never write (stripped from
                       payloads silently).
   disable_delete   -- DELETE answers 405 for this table.
+  read_only        -- only the GET routes are registered: no create,
+                      update or delete exists for this table at all
+                      (answers 405). For tables written solely by server
+                      code, e.g. audit_log.
 
 Always read-only for clients, on every table: id, created_at, updated_at,
 created_by, updated_by. created_by/updated_by are filled from the
 logged-in session (auth.audit_values) whenever the column exists, with no
 per-module config.
+
+AUDITING: every create, update and delete is recorded in audit_log
+(audit.record) inside the SAME transaction as the change, so the two
+commit or roll back together. An update reads the row first (locked) and
+logs the difference between the stored row and the returned row; hashed
+columns are reported as changed without their value.
 
 Authorization is NOT checked in this file's handlers. Each mutating
 handler only DECLARES its action via @requires; the single before_request
@@ -39,6 +49,7 @@ from sqlalchemy import Boolean, Table, delete, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from audit import describe_changes, record
 from auth import audit_values, hash_password, requires
 
 ALWAYS_READONLY = {"id", "created_at", "updated_at", "created_by", "updated_by"}
@@ -158,6 +169,10 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
             return _json_error("Not found", 404)
         return jsonify(_public(row, hidden))
 
+    # Read-only tables (e.g. audit_log) get no mutating routes at all.
+    if config.get("read_only"):
+        return bp
+
     @bp.post(f"/api/{table_name}")
     @requires(table_name, "create")
     def create():
@@ -178,6 +193,7 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
             with engine.begin() as conn:
                 result = conn.execute(insert(table).values(**columns).returning(table))
                 row = result.mappings().first()
+                record(conn, "create", table_name, row["id"], f"created {table_name} #{row['id']}")
         except IntegrityError as e:
             return _json_error(f"Constraint violation: {e.orig.diag.message_primary}", 409)
 
@@ -201,12 +217,21 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
             return _json_error("No valid fields to update", 400)
         columns.update(audit_values(table, creating=False))
 
+        row = None
         try:
             with engine.begin() as conn:
-                result = conn.execute(
-                    update(table).where(table.c.id == row_id).values(**columns).returning(table)
-                )
-                row = result.mappings().first()
+                # Locked read of the stored row, so the logged difference
+                # is exactly what this update changed.
+                before = conn.execute(
+                    select(table).where(table.c.id == row_id).with_for_update()
+                ).mappings().first()
+                if before is not None:
+                    result = conn.execute(
+                        update(table).where(table.c.id == row_id).values(**columns).returning(table)
+                    )
+                    row = result.mappings().first()
+                    record(conn, "update", table_name, row_id,
+                           describe_changes(dict(before), dict(row), hidden))
         except IntegrityError as e:
             return _json_error(f"Constraint violation: {e.orig.diag.message_primary}", 409)
 
@@ -220,11 +245,16 @@ def build_module_blueprint(module_name: str, table: Table, config: dict, engine:
         if config.get("disable_delete"):
             return _json_error("Delete is disabled for this table", 405)
 
-        with engine.begin() as conn:
-            result = conn.execute(
-                delete(table).where(table.c.id == row_id).returning(table.c.id)
-            )
-            deleted = result.first()
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(
+                    delete(table).where(table.c.id == row_id).returning(table.c.id)
+                )
+                deleted = result.first()
+                if deleted is not None:
+                    record(conn, "delete", table_name, row_id, f"deleted {table_name} #{row_id}")
+        except IntegrityError as e:
+            return _json_error(f"Constraint violation: {e.orig.diag.message_primary}", 409)
 
         if deleted is None:
             return _json_error("Not found", 404)

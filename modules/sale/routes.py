@@ -50,6 +50,16 @@ void stamps updated_by on the sale and on every product it restocks. The
 helper returns nothing for tables without those columns, so this is safe
 before the audit-column migration has run.
 
+AUDITING (audit.record, same transaction as the change it describes):
+  checkout  -> "create" on sale (one entry summarising the lines; sale_item
+               rows are not logged individually), one "override" entry per
+               overridden line in the form "Override on product/item X",
+               and one "update" on product per stock change.
+  void      -> "void" on sale, plus one "update" on product per restock.
+  remove    -> "delete" on sale.
+Stock before/after values come from rows this code already holds locked,
+so logging adds no extra reads.
+
 /api/sale/<id>/items is a read-only join, used by the frontend's detail
 ("View") screen -- crud.py's generic show() only returns the sale row
 itself, never its line items.
@@ -80,6 +90,7 @@ from sqlalchemy import select, func
 from sqlalchemy.engine import Engine
 from sqlalchemy import Table
 
+from audit import record
 from auth import audit_values, can_current, current_user_id, requires
 
 
@@ -204,18 +215,25 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                     **audit_values(sale, creating=True),
                 ).returning(sale)
             ).mappings().first()
+            sale_id = sale_row["id"]
 
             for entry in items:
                 p = products_by_id[entry["product_id"]]
                 conn.execute(
                     sale_item.insert().values(
-                        sale_id=sale_row["id"],
+                        sale_id=sale_id,
                         product_id=p["id"],
                         quantity=entry["quantity"],
                         unit_price_at_sale=p["price"],
                         **audit_values(sale_item, creating=True),
                     )
                 )
+
+            record(conn, "create", "sale", sale_id,
+                   f"checkout: {len(items)} line(s), total {total:.2f}, {payment_method}")
+            for entry in override_items:
+                name = products_by_id[entry["product_id"]]["name"]
+                record(conn, "override", "sale", sale_id, f"Override on product/item {name}")
 
             for pid, needed in required_decrement.items():
                 conn.execute(
@@ -226,6 +244,9 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                         **audit_values(product, creating=False),
                     )
                 )
+                before = products_by_id[pid]["stock_quantity"]
+                record(conn, "update", "product", pid,
+                       f"changed stock_quantity {before} -> {before - needed} (checkout, sale #{sale_id})")
 
         return jsonify(dict(sale_row)), 201
 
@@ -271,16 +292,6 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                 [{"product_id": i["product_id"], "quantity": i["quantity"]} for i in sold_items],
             )
 
-            for pid, amount in restock.items():
-                conn.execute(
-                    product.update()
-                    .where(product.c.id == pid)
-                    .values(
-                        stock_quantity=product.c.stock_quantity + amount,
-                        **audit_values(product, creating=False),
-                    )
-                )
-
             conn.execute(
                 sale.update()
                 .where(sale.c.id == sale_id)
@@ -290,6 +301,21 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
                     **audit_values(sale, creating=False),
                 )
             )
+            record(conn, "void", "sale", sale_id,
+                   f"voided sale #{sale_id}, restocked {len(restock)} product(s)")
+
+            for pid, amount in restock.items():
+                after = conn.execute(
+                    product.update()
+                    .where(product.c.id == pid)
+                    .values(
+                        stock_quantity=product.c.stock_quantity + amount,
+                        **audit_values(product, creating=False),
+                    )
+                    .returning(product.c.stock_quantity)
+                ).scalar_one()
+                record(conn, "update", "product", pid,
+                       f"changed stock_quantity {after - amount} -> {after} (void, sale #{sale_id})")
 
         return jsonify({"voided": True, "restocked_items": len(sold_items)})
 
@@ -309,6 +335,7 @@ def build_routes(tables: dict[str, Table], engine: Engine) -> Blueprint:
 
             conn.execute(sale_item.delete().where(sale_item.c.sale_id == sale_id))
             conn.execute(sale.delete().where(sale.c.id == sale_id))
+            record(conn, "delete", "sale", sale_id, f"deleted voided sale #{sale_id}")
 
         return jsonify({"deleted": True})
 

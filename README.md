@@ -1,6 +1,3 @@
-> Branch: k8s-migration (Kubernetes deployment). main is the Docker-first branch and this
-> branch is intentionally never merged into main. See "Branches and workflow" below.
-
 # app-framework
 
 Reusable base for internal logistics/business apps. This repo is
@@ -12,11 +9,10 @@ repos, built by `scaffold.py`.
 
 ```
 core/                   never forked or copied per-app
-  backend/               Flask app.py, db.py, crud.py, auth.py, export.py,
-                         sync_tables.py, seed_admin.py
+  backend/               Flask app.py, db.py, crud.py, auth.py, audit.py,
+                         export.py, sync_tables.py, seed_admin.py
   frontend/               generic HTML/CSS/JS engine, no per-app logic
   docker/                 Dockerfile, nginx conf, docker-compose.yml
-  k8s/                    Kubernetes images, manifests (this branch only)
 
 modules/                one folder per module, pick-and-choose per app
   equipment/
@@ -26,6 +22,7 @@ modules/                one folder per module, pick-and-choose per app
     frontend/module.json     nav placement + list/form config
     frontend/module.css      optional, only if the module needs custom styling
   app_user/               login accounts; its presence turns authentication on
+  audit_log/              the Auditing module: append-only record of every mutation
   _template/              copy this to start a new module
 
 default.conf             which modules a fresh scaffold gets if --modules isn't given
@@ -33,14 +30,12 @@ setup.conf                paths/locations setup.py needs (not secrets -- those a
 permissions.conf          per-deployment role permissions (see Authentication)
 scaffold.py                builds a new app repo from core/ + selected modules
 setup.py                   brings a scaffolded app from copied-files to running
-deploy_k8s.py              builds and deploys the app to Kubernetes (this branch only)
-k8s.env.example            registry, namespace, preferred node (this branch only)
 ```
 
 ## Building a new app
 
 ```
-python scaffold.py --modules=app_user,equipment --out=../equipment-tracker
+python scaffold.py --modules=app_user,audit_log,equipment --out=../equipment-tracker
 cd ../equipment-tracker
 cp .env.example .env    # fill in real DB credentials only
 # create the module tables (see "Database prerequisites" below)
@@ -71,6 +66,13 @@ sync and seeding.
 Apps that need something beyond this get their own custom setup script --
 `setup.py` itself stays generic.
 
+If the image build fails with `401 Unauthorized` from `auth.docker.io`, the
+host has a stale Docker Hub credential. The base image is public:
+`docker logout` and re-run. To skip the rebuild entirely, the code is
+bind-mounted, so regenerating one module's table file is enough:
+`docker compose -f core/docker/docker-compose.yml run --rm app python
+core/backend/sync_tables.py --module=<name>`, then recreate the containers.
+
 ### Database prerequisites
 
 In the HA deployment the app's DB role (`webapp_app`) is deliberately
@@ -79,80 +81,15 @@ scoped privileges on them, by the companion infrastructure repo
 (`autobase-postgresql`): `sudo scripts/setup.sh` runs the
 `webapp_postgres` role, which discovers every `modules/<name>/schema.sql`
 and needs no change when a module is added. Run it before `python
-setup.py` whenever a module is added. Changes to an EXISTING table are
-never applied by that role -- they need a one-off migration script (see
-`drop_stock_check.sql` in the infrastructure repo for the pattern). The
-audit columns on the six original tables were added this way
-(`add_audit_columns.sql`, run by `scripts/migrate_audit_columns.sh`).
-
-## Branches and workflow
-
-```
-main            Docker Compose is the primary deployment. Framework fixes land here first.
-k8s-migration   main plus the Kubernetes deployment. Never merged into main.
-```
-
-- Do not open a pull request from k8s-migration into main and do not merge it.
-  main stays Docker-first; the Kubernetes files exist only on this branch.
-- Changes flow one way, main -> k8s-migration:
-
-```
-git checkout k8s-migration
-git merge main
-git push origin k8s-migration
-```
-
-- A change that applies to both deployments (framework code, modules,
-  authentication, documentation shared by both) is made on main, or
-  cherry-picked onto main, and then merged into this branch.
-- Kubernetes-only changes (core/k8s/, deploy_k8s.py, k8s.env.example, the k8s
-  lines in .gitignore and scaffold.py) are committed on this branch only.
-- Images deployed from this branch are tagged with this branch's commit hash.
-  Release tags for this branch use the prefix k8s-v.
-- Policy check: `git log --oneline origin/main..origin/k8s-migration` lists the
-  Kubernetes commits, and `git branch --merged main` must not list k8s-migration.
-
-## Kubernetes deployment (this branch)
-
-A second deployment option beside Docker Compose; the Compose files are
-untouched. Details, scheduling, security posture and limitations are in
-core/k8s/README.md.
-
-```
-client -> <either node IP>:30080 (NodePort, kube-proxy)
-       -> pod app-framework (1 replica, preferred node jenkins)
-            web container: nginx :8080 -> static files, /api/ -> 127.0.0.1:8000
-            app container: gunicorn :8000 -> 192.168.20.190:5000 (Postgres VIP)
-```
-
-Requirements: a cluster with a CNI, kube-proxy and CoreDNS; `kubectl` on the
-control node; Docker with BuildKit on the build host; a registry (GHCR);
-`modules/<name>/table_core.py` committed for every module; `.env` (same file
-Compose uses) and `k8s.env` (copy `k8s.env.example`).
-
-Build host (jenkins), clean git tree on this branch:
-
-```
-python3 deploy_k8s.py build
-python3 deploy_k8s.py push
-```
-
-Control node (srv-deploy-eng), this branch checked out:
-
-```
-python3 deploy_k8s.py config
-python3 deploy_k8s.py apply --tag <commit hash of the images>
-python3 deploy_k8s.py seed  --tag <commit hash of the images>
-python3 deploy_k8s.py status
-```
-
-- `--tag` is required whenever the checkout's commit differs from the commit
-  the images were built from, for example after a documentation-only commit.
-- The control node must keep swap disabled. systemd's GPT auto-generator
-  re-enables a swap partition at boot unless its units are masked, and kubelet
-  refuses to start with swap on.
-- After a failover the pod stays on the node it moved to. Move it back with
-  `kubectl -n app-framework rollout restart deploy/app-framework`.
+setup.py` whenever a module is added. The role reads the module list from
+the app checkout on the app host, so the module folder must be copied
+there first. Changes to an EXISTING table are never applied by that role --
+they need a one-off migration script (see `drop_stock_check.sql` in the
+infrastructure repo for the pattern). The audit columns on the six original
+tables were added this way (`add_audit_columns.sql`, run by
+`scripts/migrate_audit_columns.sh`), and so were the void columns on `sale`
+(`add_void_columns.sql`, run by `scripts/migrate_void_columns.sh`). Run a
+migration BEFORE `python setup.py`, since `setup.py` reflects the live table.
 
 ## Authentication
 
@@ -192,14 +129,16 @@ Two roles, fixed: `admin` and `staff`. Actions: `create`, `update`,
 | `PUT /api/<table>/<id>` | update |
 | `DELETE /api/<table>/<id>` | delete |
 | `POST /api/sale/checkout` | create on `sale` |
-| `DELETE /api/sale/<id>/void` | void on `sale` |
+| `POST /api/sale/<id>/void` | void on `sale` |
+| `DELETE /api/sale/<id>/remove` | delete on `sale` (voided sales only) |
 | checkout item with `"override": true` | override on `sale` (checked in addition to create) |
 
 Default policy: admin has every action, staff has `create` only. This
 simulates only senior staff holding authority to edit, delete or void.
 Consequences worth knowing: staff cannot release an assignment (setting
 `released_at` is an update), cannot edit products or recipes (a recipe
-edit is delete plus create), and cannot override stock at checkout.
+edit is delete plus create), cannot void or delete a sale, and cannot
+override stock at checkout.
 
 ### Permission layers
 
@@ -232,10 +171,13 @@ rather than silently falling back to the default grant. Permissions are
 not secrets, so the file is committed; protection comes from server-side
 enforcement and from the app exposing no API that can write it.
 
-Invariants on `app_user` regardless of configuration: staff have no
-actions on it, admin always keeps create and update, and delete is
-disabled for everyone (users are deactivated, never deleted, so
-attribution columns stay valid).
+Invariants regardless of configuration:
+
+- `app_user`: staff have no actions, admin always keeps create and update,
+  and delete is disabled for everyone (users are deactivated, never
+  deleted, so attribution columns stay valid).
+- `audit_log`: no role has any action on it. It is written only by server
+  code (see Auditing).
 
 ### Sessions
 
@@ -324,15 +266,85 @@ update among the group's rows. Usernames are resolved from the open
 `GET /api/app_user`. The audit columns are derived from the rows, so an
 empty list shows none until its first row exists.
 
+## Auditing
+
+The `audit_log` module (nav label "Auditing") is an append-only record of
+every mutation. `core/backend/audit.py` provides `record()`, which writes
+one row inside the SAME transaction as the change it describes, so a
+change and its log entry commit or roll back together: there is never a
+change without an entry, or an entry without a change. Logging is active
+only when `modules/audit_log` is present; without it `record()` is a no-op
+and the app runs as before.
+
+### What is logged
+
+| Source | Entries |
+|---|---|
+| generic create / update / delete (`crud.py`) | `create` / `update` / `delete` on that table |
+| password change (`POST /api/auth/password`) | `update` on `app_user`, "changed own password (value hidden)" |
+| checkout | `create` on `sale` (one entry summarising the lines; `sale_item` rows are not logged individually), one `override` entry per overridden line, one `update` on `product` per stock change |
+| void | `void` on `sale`, one `update` on `product` per restock |
+| sale delete (`/remove`) | `delete` on `sale` |
+
+Not logged: reads, login and logout, the admin seed, and failed or
+rejected requests (a 403 or 409 changes nothing, so it has no entry).
+
+### Columns
+
+`id`, `username`, `action` (`create`/`update`/`delete`/`void`/`override`),
+`table_name`, `row_id`, `detail`, `created_at`.
+
+- `username` is TEXT resolved from the session at the time of the action,
+  not a reference to `app_user`, so a deactivated or renamed account never
+  corrupts historical readability. With authentication disabled it is
+  `anonymous`.
+- `detail` is a short free-form summary. Creates and deletes read
+  "created product #12" / "deleted product #12". Updates read the
+  difference between the stored row and the returned row, e.g. "changed
+  price 8000 -> 9000; name Tea -> Black tea", skipping the system-maintained
+  columns (`id`, `created_at`, `updated_at`, `created_by`, `updated_by`).
+  A checkout override reads "Override on product/item X". Stock changes
+  read "changed stock_quantity 10 -> 8 (checkout, sale #5)".
+- Values of `hashed_fields` columns are never written: a changed password
+  reads "password_hash (value hidden)". Detail is truncated at 500
+  characters and any single value at 80.
+- `audit_log` has no `created_by`/`updated_by` and no `updated_at`: rows
+  are never updated and `username` is the attribution.
+
+### Append-only enforcement
+
+Four independent layers:
+
+1. `table.json` sets `"read_only": true`: `crud.py` registers only the GET
+   routes, so POST/PUT/DELETE answer 405.
+2. `auth.py` gives no role any action on `audit_log`, regardless of
+   `permissions.conf` or the module's `table.json`.
+3. `schema.sql` blocks UPDATE, DELETE and TRUNCATE with triggers. The app
+   role is granted UPDATE/DELETE like every other module table (the
+   `webapp_postgres` role grants uniformly), so the trigger, not the grant,
+   is what enforces it.
+4. Only `audit.record()` ever inserts.
+
+A Postgres superuser can still drop the triggers: this protects against
+application bugs and the app role, not against a database administrator.
+
+### Reading it
+
+Reads are open by design, so anyone who can reach the app can read the
+log, including usernames and amounts. The Auditing screen lists newest
+first, shows the time to the minute (the full timestamp is stored), and has
+a read-only View per entry. It is included in the Excel export like every
+other table.
+
 ## Adding a module
 
 1. Copy `modules/_template/` to `modules/<name>/`.
 2. Fill in `table.json`, `schema.sql`, `frontend/module.json`. Keep the
    `created_by`/`updated_by` columns from the template: `crud.py` fills
    them from the session automatically.
-3. Create the table and grant the app's DB role scoped privileges -- run
-   the infrastructure repo's `webapp_postgres` role (see Database
-   prerequisites).
+3. Create the table and grant the app's DB role scoped privileges -- copy
+   the module folder to the app host, then run the infrastructure repo's
+   `webapp_postgres` role (see Database prerequisites).
 4. Run `python core/backend/sync_tables.py --module=<name>` (or just `python
    setup.py`) to generate `table_core.py`.
 5. Add `<name>` to `default.conf` if it should ship by default, and to
@@ -348,7 +360,10 @@ case that's a deliberate, separate addition to that module's folder (a
 `routes.py`, per `assignment`'s and `sale`'s pattern below). Every
 mutating route in a `routes.py` MUST declare its permission with
 `@requires(table, action)` (from `auth`) directly under the route
-decorator; an undeclared mutating route is admin-only.
+decorator; an undeclared mutating route is admin-only. Every mutation in a
+`routes.py` SHOULD call `audit.record(conn, action, table, row_id,
+detail)` inside its own transaction, so it appears in the Auditing module
+(`from audit import record`).
 
 ### Optional `table.json` keys
 
@@ -369,11 +384,16 @@ decorator; an undeclared mutating route is admin-only.
   password-hashed (with the length policy) before storage, and these
   columns are removed from EVERY response: list, show, create/update
   returns, the distinct endpoint (which answers 404 for them), and the
-  Excel export. Used by `app_user`.
+  Excel export. Used by `app_user`. They are also never written to the
+  audit log.
 - `"readonly_fields": ["col"]` -- columns the client may never write;
-  silently stripped from payloads.
+  silently stripped from payloads. Used by `sale` for `voided_at` and
+  `voided_by`.
 - `"disable_delete": true` -- `DELETE` answers 405 and `delete` is removed
   from every role's permissions for the table.
+- `"read_only": true` -- only the GET routes are registered; create,
+  update and delete do not exist for the table (405). For tables written
+  solely by server code. Used by `audit_log`.
 - `"permissions": {"admin": [...], "staff": [...]}` -- module default
   permissions (see Permission layers).
 
@@ -404,7 +424,8 @@ Beyond the original `table`/`label`/`order`/`default`/`columns`/`form`/
   single-record create form. Used by modules whose rows should never be
   created through the generic single-table POST (e.g. `sale`, which is
   only ever created atomically through a checkout endpoint -- see
-  `cart_checkout` below).
+  `cart_checkout` below, and `audit_log`, which is never created by a
+  client).
 - `"cart_checkout"` (bool) -- overrides `hide_add`'s button suppression
   with a "+ New Sale" button that opens a cart UI instead of the generic
   form (`_renderCart` in `app.js`): a browsable product list, an
@@ -428,12 +449,22 @@ Beyond the original `table`/`label`/`order`/`default`/`columns`/`form`/
 - `"detail_summary"` -- array of `{ key, label, format? }`, the same
   shape as `columns`, rendered as a label/value table at the top of the
   detail view before the related-items table.
-- `"void_endpoint"` -- if present, a row's "Delete" button calls this
-  URL template (`{id}` substituted) via `DELETE` instead of the generic
-  `Api.remove`, and is governed by the `void` permission instead of
-  `delete`. Used by `sale`, whose deletion must reverse the checkout's
-  side effects (see `sale`'s `routes.py` below) rather than just removing
-  a row.
+
+Keep-and-tag voiding (all three `void_*` keys and `purge_endpoint` work
+together; used by `sale`):
+
+- `"void_endpoint"` -- URL template (`{id}` substituted) called with `POST`
+  by a row's "Void" button, governed by the `void` permission. The
+  endpoint must not delete the row.
+- `"void_flag_field"` -- the row column that is non-null once voided
+  (`voided_at`). An active row shows Void; a voided row gets a "voided" tag
+  next to its first column and no Void button. Setting it together with
+  `void_endpoint` is what switches the list into void mode.
+- `"void_by_field"` -- the column holding who voided it (`voided_by`, the
+  default), shown with the voided time on the detail screen.
+- `"purge_endpoint"` -- URL template called with `DELETE` by a voided
+  row's "Delete" button, governed by the `delete` permission. Active rows
+  never offer Delete.
 
 ### Optional `columns`/`detail_summary` entry keys
 
@@ -464,12 +495,14 @@ field; `crud.py` coerces them (SQLAlchemy's Boolean type rejects strings).
 
 ### Generic constraint-violation handling in `crud.py`
 
-`create()` and `update_row()` both wrap their SQL in `try/except
-IntegrityError`, returning a clean `409` with Postgres's own
+`create()`, `update_row()` and `delete_row()` all wrap their SQL in
+`try/except IntegrityError`, returning a clean `409` with Postgres's own
 `message_primary` text (e.g. `duplicate key value violates unique
-constraint "recipe_unique_pair"`) instead of a raw `500`. Framework-level,
-not module-specific. The last-admin trigger on `app_user` relies on this:
-it raises with `ERRCODE = 'check_violation'` so it surfaces as a 409.
+constraint "recipe_unique_pair"`, or a foreign-key violation when deleting
+a product that a recipe still references) instead of a raw `500`.
+Framework-level, not module-specific. The last-admin trigger on `app_user`
+relies on this: it raises with `ERRCODE = 'check_violation'` so it surfaces
+as a 409.
 
 ### Optional `frontend/module.json` keys for multi-row parent+children editing
 
@@ -521,12 +554,13 @@ has NOT been overridden.
 
 The flag is sent to `/api/sale/checkout` as `items[].override: true`. The
 backend rejects the whole checkout with 403 if the caller lacks `override`
--- never a silent downgrade to a non-override sale. Backend behavior and
-its one real limitation are documented in `sale/routes.py`'s module
-docstring: override is resolved through the same per-underlying-product
-aggregation the normal stock check uses, so if two cart lines share an
-ingredient and only one is marked override, the whole combined shortfall
-for that ingredient is allowed through.
+-- never a silent downgrade to a non-override sale. Every overridden line
+is recorded in the Auditing module as "Override on product/item X".
+Backend behavior and its one real limitation are documented in
+`sale/routes.py`'s module docstring: override is resolved through the same
+per-underlying-product aggregation the normal stock check uses, so if two
+cart lines share an ingredient and only one is marked override, the whole
+combined shortfall for that ingredient is allowed through.
 
 This required a real schema change: `product.stock_quantity` originally
 had `CHECK (stock_quantity >= 0)`, which was dropped (one-off migration,
@@ -544,6 +578,11 @@ authorized user confirmed physical stock existed".
   and `created_by`/`updated_by`. Its presence enables authentication.
   Only admins may create or update users. A DB trigger prevents demoting
   or deactivating the last active admin.
+- **`audit_log`** -- the Auditing module: append-only record of every
+  mutation, written by server code only (see Auditing). Read-only in the
+  UI and API; independent of `app_user` at the schema level, but only
+  meaningful with it, since without authentication every entry is
+  `anonymous`.
 - **`equipment`** / **`assignment`** -- the original pair. `equipment`
   is plain CRUD with a hardcoded `category`/`status` vocabulary (stable
   across deployments, unlike `product`'s). `assignment` models a
@@ -560,8 +599,11 @@ authorized user confirmed physical stock existed".
   see `sale`'s `routes.py` below. `sale_item` snapshots
   `unit_price_at_sale` at the time of sale rather than joining live to
   `product.price`, so a later price change never rewrites historical
-  sales. `sale`'s `frontend/module.json` uses `hide_add` +
-  `cart_checkout`, `detail_view` + `detail_endpoint`, and `void_endpoint`.
+  sales. `sale` carries nullable `voided_at`/`voided_by`: NULL means
+  active. `sale`'s `frontend/module.json` uses `hide_add` +
+  `cart_checkout`, `detail_view` + `detail_endpoint`, and the keep-and-tag
+  void keys (`void_endpoint`, `void_flag_field`, `void_by_field`,
+  `purge_endpoint`).
 - **`recipe`** -- ties a menu-item `product` to its ingredient
   `product`(s) with a `quantity_required` per ingredient, enabling cafe
   support: a sold "menu item" decrements its ingredients' stock instead
@@ -577,15 +619,16 @@ authorized user confirmed physical stock existed".
   /api/reporting/sales-summary[?start_date=&end_date=]` groups
   `sale_item` by `(product_id, unit_price_at_sale)`, so a price change
   mid-period surfaces as two separate summary rows, not a blended
-  average. Uses `report_view` on the frontend.
+  average. Voided sales are excluded. Uses `report_view` on the frontend.
 
 ### `sale`'s `routes.py` -- the framework's first multi-table transactional module
 
-Three endpoints beyond generic CRUD, all atomic (single `engine.begin()`
-transaction each). All three share one helper, `_resolve_stock_impact`,
-which takes `[{product_id, quantity}, ...]` and returns
-`{underlying_product_id: total_qty}` -- resolving each sold item through
-`recipe` or, for a plain item with no `recipe` rows, onto itself directly.
+Four endpoints beyond generic CRUD, all atomic (single `engine.begin()`
+transaction each, including their audit entries). Checkout and void share
+one helper, `_resolve_stock_impact`, which takes `[{product_id, quantity},
+...]` and returns `{underlying_product_id: total_qty}` -- resolving each
+sold item through `recipe` or, for a plain item with no `recipe` rows,
+onto itself directly.
 
 - **`POST /api/sale/checkout`** (`create`; `override` additionally for
   override items) -- takes `{ payment_method, items:
@@ -597,18 +640,31 @@ which takes `[{product_id, quantity}, ...]` and returns
   success: inserts the `sale` row, one `sale_item` per line (snapshotting
   `product.price`), and decrements each underlying product's
   `stock_quantity`. `created_by`/`updated_by` are stamped on the sale, its
-  line items, and every product whose stock changes. Any failure rolls
-  back the whole transaction.
+  line items, and every product whose stock changes. Audit entries: one
+  `create` on the sale, one `override` per overridden line, one `update`
+  per stock change. Any failure rolls back the whole transaction.
 - **`GET /api/sale/<id>/items`** -- read-only join of `sale_item` to
   `product`, used by the frontend's `detail_view` screen.
-- **`DELETE /api/sale/<id>/void`** (`void`) -- the reverse of checkout:
+- **`POST /api/sale/<id>/void`** (`void`) -- keep-and-tag: sets
+  `voided_at` and `voided_by` on the sale and gives the stock back, but
+  the `sale` and `sale_item` rows stay, so the sale remains visible
+  tagged "voided" and its View screen still shows what was voided. The
+  sale row is locked first, so a second void (or a concurrent one)
+  answers `409` and stock can never be restored twice. Restock
   re-resolves each sold line through `_resolve_stock_impact` against
   `recipe` as it currently stands (no snapshot of a sale-time recipe
   exists; if a recipe changes between sale and void, the restock follows
-  the edited recipe -- accepted limitation), adds the quantities back
-  onto `stock_quantity`, then deletes the `sale_item` rows and the `sale`
-  row, all in one transaction. `sale_item.sale_id` references `sale(id)`
-  with the default `RESTRICT`, so a bare delete fails by design.
+  the edited recipe -- accepted limitation). Audit entries: one `void`,
+  one `update` per restocked product. Reporting excludes voided sales.
+- **`DELETE /api/sale/<id>/remove`** (`delete`) -- permanently deletes a
+  sale, and ONLY a voided one (`409` otherwise). It deletes the
+  `sale_item` rows first (`sale_item.sale_id` references `sale(id)` with
+  the default `RESTRICT`) and never touches stock: the void already
+  restored it. Audit entry: one `delete`. The generic `DELETE
+  /api/sale/<id>` still exists but is not used by the UI.
+
+The same keep, tag, then allow-delete pattern is the intended shape of the
+future Refund feature.
 
 ## Key design decisions (do not re-litigate without reason)
 
@@ -623,11 +679,12 @@ which takes `[{product_id, quantity}, ...]` and returns
   the single source of truth for table structure; `sync_tables.py`
   reflects it from a live database into the generated file.
 - **CRUD routing stays generic even as it grows.** The sort key, the
-  distinct-values endpoint, hashing, read-only fields, and the
-  `hide_add`/`detail_view`/`cart_checkout`/`void_endpoint` config surface
-  all live in `crud.py`'s shared blueprint builder or `app.js`'s shared
-  renderer, not in any one module. A module only needs its own Python (a
-  `routes.py`) for real cross-table or transactional business logic.
+  distinct-values endpoint, hashing, read-only fields, `read_only` tables,
+  and the `hide_add`/`detail_view`/`cart_checkout`/void-mode config
+  surface all live in `crud.py`'s shared blueprint builder or `app.js`'s
+  shared renderer, not in any one module. A module only needs its own
+  Python (a `routes.py`) for real cross-table or transactional business
+  logic.
 - **A cart/checkout UI is genuinely custom frontend work, not config.**
   `_renderCart` is the one piece of rendering logic that isn't purely
   config-driven -- a variable-length item list with live quantity
@@ -652,23 +709,46 @@ which takes `[{product_id, quantity}, ...]` and returns
   attribution stays valid.
 - **Sensitive columns are hidden everywhere or nowhere.** A hashed column
   is stripped from list, show, write responses, the distinct endpoint and
-  the (unauthenticated) export; hiding it from only some paths is a leak.
+  the (unauthenticated) export, and is never written to the audit log;
+  hiding it from only some paths is a leak.
+- **Voiding keeps the record.** A void tags the sale and restores stock,
+  and only a voided sale can then be deleted. The record of a sale is
+  never destroyed by a single click.
+- **A change and its audit entry are one transaction.** `audit.record()`
+  runs on the caller's open connection, never in a second transaction, so
+  the log cannot disagree with the data.
+- **The audit log stores usernames as text.** Attribution survives account
+  deactivation or renaming; the log never depends on `app_user` rows
+  staying as they were.
+- **The audit log is append-only at the database, not only in code.**
+  Application-level guards can be bypassed by a bug; the trigger cannot.
 
 ## Known limitations and pending work
 
 - Reads are open by design, so `GET /api/app_user` returns usernames,
-  roles, active flags and lock state to anyone who can reach the app.
-  Password hashes are never exposed.
+  roles, active flags and lock state, and `GET /api/audit_log` returns the
+  whole audit trail, to anyone who can reach the app. Password hashes are
+  never exposed.
 - `created_by`/`updated_by` exist on every table but are nullable: rows
   created before authentication, or with it disabled, have no author.
   They are filled from the session by `crud.py` and `sale/routes.py`; a
-  NULL author is displayed as `-`.
-- Not yet built: keeping and tagging voided sales instead of deleting
-  them, and the `audit_log` module.
+  NULL author is displayed as `-`. Sales that predate void keep-and-tag
+  were deleted by the old void and cannot be recovered.
+- No list is paginated: every `GET /api/<table>` returns all rows. This
+  matters most for Auditing, which only grows. Pagination would be a
+  generic change to `crud.py` and `app.js`.
+- Audit timestamps display to the minute; ordering within a minute follows
+  `id`.
+- The audit triggers can be dropped by a Postgres superuser.
+- Not yet built: the Refund and Purchasing/Restock modules.
+- The generic `DELETE /api/sale/<id>` is still registered; it fails on the
+  `sale_item` foreign key when a sale has items, but would delete a sale
+  that has none. The UI never calls it.
 - The session cookie is not `Secure` by default (plain HTTP on a LAN).
 - Lockout is temporary but can be triggered deliberately against a known
   username.
 - Permission changes need an app restart.
-- Recipe edits are delete-then-create and not atomic.
+- Recipe edits are delete-then-create and not atomic (and appear as
+  separate entries in Auditing).
 - Non-browser clients must send `X-Requested-With: app-framework` on every
   mutating request.

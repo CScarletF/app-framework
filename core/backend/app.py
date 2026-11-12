@@ -23,6 +23,11 @@ activates if modules/app_user is present; otherwise the app runs exactly
 as before, unauthenticated. It sits between the passes only for clarity --
 app-level hooks apply to every blueprint regardless of registration order.
 
+AUDITING: init_audit finds modules/audit_log among the loaded tables so
+audit.record() can write to it from crud.py, auth.py and any routes.py.
+Without that module record() is a no-op. It runs before the second pass,
+so every module's routes.py sees an initialised audit writer.
+
 Also registers export.py's framework-level multi-sheet Excel export,
 which covers every module's table -- not tied to any single module, so
 it's wired directly here rather than via a module's own routes.py.
@@ -35,6 +40,7 @@ from pathlib import Path
 
 from flask import Flask, jsonify
 
+from audit import init_audit
 from auth import init_auth
 from db import get_engine
 from crud import build_module_blueprint
@@ -101,6 +107,10 @@ def create_app() -> Flask:
     # pass. Returns False (no-op) when modules/app_user isn't present.
     auth_active = init_auth(app, engine, tables, table_configs, PROJECT_ROOT)
 
+    # Audit writer: finds audit_log among the loaded tables. False (and
+    # record() stays a no-op) when modules/audit_log isn't present.
+    audit_active = init_audit(tables)
+
     # Second pass: optional routes.py per module, for cross-table logic
     # that doesn't fit generic CRUD. Runs after the loop above so every
     # module's table is already in `tables`, regardless of folder order --
@@ -125,7 +135,12 @@ def create_app() -> Flask:
         # Deliberately does NOT touch the database -- this endpoint is for
         # setup.py's verify step to confirm the app process itself is up,
         # independent of whether the DB/schema sync has happened yet.
-        return jsonify({"status": "ok", "modules": list(seen_tables.values()), "auth": auth_active})
+        return jsonify({
+            "status": "ok",
+            "modules": list(seen_tables.values()),
+            "auth": auth_active,
+            "audit": audit_active,
+        })
 
     return app
 

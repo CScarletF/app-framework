@@ -1,0 +1,16 @@
+{
+    "table": "audit_log",
+    "label": "Auditing",
+    "order": 95,
+    "default": false,
+    "hide_add": true,
+    "columns": [
+        { "key": "created_at", "label": "Time", "format": "datetime" },
+        { "key": "username", "label": "User" },
+        { "key": "action", "label": "Action" },
+        { "key": "table_name", "label": "Table" },
+        { "key": "row_id", "label": "Row" },
+        { "key": "detail", "label": "Detail" }
+    ],
+    "form": []
+}

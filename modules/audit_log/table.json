@@ -1,0 +1,6 @@
+{
+    "table": "audit_log",
+    "required": [],
+    "allowed_values": {},
+    "read_only": true
+}
