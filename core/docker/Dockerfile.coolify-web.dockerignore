@@ -1,0 +1,11 @@
+# Allow-list: everything is excluded unless re-included below.
+*
+!core/frontend
+!core/docker/nginx/coolify.conf
+!modules
+
+# Only modules/<name>/frontend is used; drop backend files from the context.
+**/*.py
+**/*.sql
+modules/*/table.json
+**/__pycache__

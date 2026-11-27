@@ -1,0 +1,31 @@
+# core/docker/Dockerfile.coolify-web -- static frontend + nginx for the Coolify deployment.
+#
+# Same as core/k8s/Dockerfile.web, except the server block proxies to the
+# Compose service `app` instead of 127.0.0.1 (nginx and gunicorn are separate
+# containers here, not one pod). Build context: repository root.
+# Backend source (routes.py, table_core.py, schema.sql) never reaches this image.
+
+FROM busybox:1.37.0 AS assemble
+
+COPY core/frontend /out
+COPY modules /src/modules
+
+# Keep only modules/<name>/frontend, skipping stub folders such as _template.
+RUN set -eu; \
+    for dir in /src/modules/*/; do \
+        name="$(basename "$dir")"; \
+        case "$name" in _*) continue ;; esac; \
+        if [ -d "${dir}frontend" ]; then \
+            mkdir -p "/out/modules/${name}"; \
+            cp -r "${dir}frontend" "/out/modules/${name}/frontend"; \
+        fi; \
+    done
+
+FROM ghcr.io/nginxinc/nginx-unprivileged:stable-alpine
+
+# Replaces only the server block. The image's own nginx.conf is kept: it
+# already moves the pid and temp paths to /tmp for a non-root user.
+COPY core/docker/nginx/coolify.conf /etc/nginx/conf.d/default.conf
+COPY --from=assemble /out /usr/share/nginx/html
+
+EXPOSE 8080

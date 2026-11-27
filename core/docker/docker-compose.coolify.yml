@@ -1,27 +1,29 @@
 # Coolify variant of docker-compose.yml. The Compose file next to it is unchanged
 # and stays the source for `python setup.py` on a plain Docker host.
 #
+# Code is baked into images, not bind-mounted: Coolify resolves relative bind
+# mounts against its own config directory on the target (/data/coolify/applications/<uuid>),
+# where the repository files are not available.
+#
+#   app    built from core/k8s/Dockerfile.app (the Kubernetes backend image, unchanged)
+#   nginx  built from core/docker/Dockerfile.coolify-web (frontend + server block proxying to app)
+#
 # Differences from docker-compose.yml:
 #   - no env_file: Coolify injects variables, mapped explicitly below
 #   - nginx publishes APP_HOST_PORT (default 8082) on the host. With a Coolify proxy
 #     (Traefik) the port is not needed and can be ignored
-#   - no custom network: Coolify manages networking
+#   - modules/<name>/table_core.py must be committed: it is baked into the image
 #
 # Configure in Coolify: build pack Docker Compose, base directory /core/docker,
 # compose location /docker-compose.coolify.yml. With a proxy, set a domain on the
-# nginx service (http://host:80).
-# Relative bind mounts (../..) assume Coolify checks the repo out on the target host.
+# nginx service (http://host:8080).
 
 services:
   app:
     build:
       context: ../..
-      dockerfile: core/docker/python/Dockerfile
+      dockerfile: core/k8s/Dockerfile.app
     restart: unless-stopped
-    volumes:
-      # Whole project root: app.py discovers modules/ at runtime
-      - ../..:/app
-    working_dir: /app
     environment:
       - DB_HOST=${DB_HOST:?DB_HOST is required}
       - DB_PORT=${DB_PORT:-5000}
@@ -38,18 +40,16 @@ services:
       - LOGIN_MAX_ATTEMPTS=${LOGIN_MAX_ATTEMPTS:-5}
       - LOGIN_LOCKOUT_MINUTES=${LOGIN_LOCKOUT_MINUTES:-15}
       - PASSWORD_MIN_LENGTH=${PASSWORD_MIN_LENGTH:-8}
-    command: gunicorn --chdir core/backend -w 2 -b 0.0.0.0:8000 app:app
+      - GUNICORN_CMD_ARGS=--workers ${GUNICORN_WORKERS:-2}
 
   nginx:
-    image: nginx:alpine
+    build:
+      context: ../..
+      dockerfile: core/docker/Dockerfile.coolify-web
     restart: unless-stopped
-    volumes:
-      - ../../core/frontend:/var/www/frontend:ro
-      - ../../modules:/var/www/frontend/modules:ro
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - app
     ports:
-      - "${APP_HOST_PORT:-8082}:80"
+      - "${APP_HOST_PORT:-8082}:8080"
     expose:
-      - "80"
+      - "8080"
